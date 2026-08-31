@@ -3,13 +3,17 @@
 //! shared by both gesture-capture paths. This is input processing, distinct
 //! from the `Action` vocabulary the parent [`binding`](super) module defines.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::GestureDirection;
 
 /// Minimum dominant-axis travel (raw-XY units) before a held gesture commits to
 /// a direction. Tuned to match Logitech Options+'s responsiveness.
 pub const GESTURE_SWIPE_THRESHOLD: i32 = 50;
+/// Travel threshold for the dedicated HID++ gesture button. Mac Mouse Fix
+/// commits once the first pointer offset exceeds seven points; raw-XY uses an
+/// inclusive threshold, so eight units is the equivalent boundary.
+pub const HIDPP_GESTURE_SWIPE_THRESHOLD: i32 = 8;
 /// Maximum cross-axis travel allowed at the threshold, so only a reasonably
 /// straight swipe commits. Grows with the dominant axis (`max(deadzone, 35%)`).
 pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
@@ -27,12 +31,15 @@ pub const GESTURE_SWIPE_DEADZONE: i32 = 40;
 pub const GESTURE_REPEAT_DISTANCE: i32 = 12 * GESTURE_SWIPE_THRESHOLD;
 /// How long the pointer must rest mid-hold to end a stroke: the next swipe then
 /// starts fresh and may repeat the last direction at the normal threshold.
-pub const GESTURE_REARM_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
-/// Minimum time a gesture button must be held before its travel can commit to a
-/// swipe. Distinguishes a deliberate hold-and-swipe from a quick click whose
-/// cursor happened to be moving. Shared by both gesture paths (the HID++ thumb
-/// pad and the OS-hook Back/Forward buttons).
-pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::from_millis(160);
+pub const GESTURE_REARM_PAUSE: Duration = Duration::from_millis(250);
+/// Minimum time the default gesture accumulator requires before travel can
+/// commit to a swipe. It distinguishes a deliberate hold-and-swipe from a
+/// quick click whose cursor happened to be moving; the dedicated HID++ gesture
+/// button opts into [`HIDPP_GESTURE_HOLD_FOR_SWIPE`] instead.
+pub const GESTURE_HOLD_FOR_SWIPE: Duration = Duration::from_millis(160);
+/// The dedicated HID++ gesture button classifies the first meaningful flick;
+/// it does not require the pointer to remain still before motion can count.
+pub const HIDPP_GESTURE_HOLD_FOR_SWIPE: Duration = Duration::ZERO;
 
 /// Classify the *running* raw-XY travel of a held gesture button into a
 /// directional swipe, the instant it commits — or `None` while it's still too
@@ -48,6 +55,11 @@ pub const GESTURE_HOLD_FOR_SWIPE: std::time::Duration = std::time::Duration::fro
 /// down), so an upward swipe (negative `dy`) maps to [`GestureDirection::Up`].
 #[must_use]
 pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
+    detect_swipe_with_threshold(dx, dy, GESTURE_SWIPE_THRESHOLD)
+}
+
+/// Classify raw-XY travel using a caller-selected dominant-axis threshold.
+fn detect_swipe_with_threshold(dx: i32, dy: i32, threshold: i32) -> Option<GestureDirection> {
     // Saturating throughout: a [`SwipeAccumulator`] hold that never commits (a
     // sustained diagonal) keeps summing travel, so `dx`/`dy` can reach the i32
     // bounds. `i32::MIN.abs()` would panic and a plain `dominant * 35` would
@@ -55,7 +67,7 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
     // hazard we must never hit. The clamp is inert in the normal range.
     let (abs_x, abs_y) = (dx.saturating_abs(), dy.saturating_abs());
     let dominant = abs_x.max(abs_y);
-    if dominant < GESTURE_SWIPE_THRESHOLD {
+    if dominant < threshold {
         return None;
     }
     let cross_limit = GESTURE_SWIPE_DEADZONE.max(dominant.saturating_mul(35) / 100);
@@ -84,9 +96,10 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 /// HID++ gesture sources (`openlogi-hid`'s `0x1b04` raw-XY divert) and the
 /// OS-hook Middle/Back/Forward buttons (`openlogi-agent-core`'s CGEventTap). A gesture
 /// button's hold accumulates travel; the instant the dominant axis commits a
-/// direction — after the button has been held [`GESTURE_HOLD_FOR_SWIPE`], so a
-/// quick click whose cursor drifted doesn't count — [`Self::accumulate`] returns
-/// that direction exactly once, like Logitech Options+. A hold that never
+/// direction — according to the accumulator's source policy —
+/// [`Self::accumulate`] returns it, like Logitech Options+. The default policy
+/// chains further swipes within the same hold; the dedicated HID++ gesture
+/// button commits at most one flick per physical hold. A hold that never
 /// commits is a plain click, reported by [`Self::end`].
 ///
 /// The two paths differ only in *what identifies the held control* (a
@@ -94,7 +107,7 @@ pub fn detect_swipe(dx: i32, dy: i32) -> Option<GestureDirection> {
 /// that and embeds this for the shared travel logic. Keeping the logic in one
 /// place is deliberate: the two copies it replaced had already drifted apart
 /// (one resolved a swipe only on release), which mis-fired the click.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SwipeAccumulator {
     /// When the current hold began, or `None` when not holding. Gates a
     /// deliberate swipe against a quick click whose cursor happened to move.
@@ -118,9 +131,46 @@ pub struct SwipeAccumulator {
     repeat_cross: i32,
     /// When the last motion arrived, to detect the pause that ends a stroke.
     moved_at: Option<Instant>,
+    /// Dominant-axis travel required by this accumulator's input source.
+    threshold: i32,
+    /// Minimum hold duration required by this accumulator's input source.
+    hold_for_swipe: Duration,
+    /// Whether one hold may commit further swipes after the first. A low
+    /// flick threshold would read any wobble after a commit as a reversal,
+    /// so the HID++ flick policy fires once per hold.
+    chain: bool,
 }
 
 impl SwipeAccumulator {
+    /// Build an accumulator with an explicit source policy.
+    fn with_policy(threshold: i32, hold_for_swipe: Duration, chain: bool) -> Self {
+        Self {
+            held_since: None,
+            dx: 0,
+            dy: 0,
+            fired: false,
+            last: None,
+            repeat: 0,
+            repeat_cross: 0,
+            moved_at: None,
+            threshold,
+            hold_for_swipe,
+            chain,
+        }
+    }
+
+    /// The Mac Mouse Fix-like policy used by the dedicated HID++ gesture
+    /// button: classify the first clean flick without a 160 ms hold gate, and
+    /// commit at most one flick per physical hold.
+    #[must_use]
+    pub fn hidpp_gesture() -> Self {
+        Self::with_policy(
+            HIDPP_GESTURE_SWIPE_THRESHOLD,
+            HIDPP_GESTURE_HOLD_FOR_SWIPE,
+            false,
+        )
+    }
+
     /// Begin a fresh hold, resetting the travel accumulator and commit state.
     pub fn begin(&mut self) {
         self.held_since = Some(Instant::now());
@@ -141,11 +191,16 @@ impl SwipeAccumulator {
     }
 
     /// Feed a pointer-move / raw-XY delta into the current hold. Returns
-    /// `Some(direction)` the instant travel commits (only after the hold passes
-    /// [`GESTURE_HOLD_FOR_SWIPE`]), then restarts travel so the same hold can
-    /// commit again; `None` while still too short or not holding.
+    /// `Some(direction)` the instant travel commits (only after this
+    /// accumulator's configured hold duration), then — under a chaining
+    /// policy — restarts travel so the same hold can commit again; `None`
+    /// while still too short, already committed without chaining, or not
+    /// holding.
     pub fn accumulate(&mut self, dx: i32, dy: i32) -> Option<GestureDirection> {
         self.held_since?;
+        if self.fired && !self.chain {
+            return None;
+        }
         let now = Instant::now();
         if self
             .moved_at
@@ -231,8 +286,10 @@ impl SwipeAccumulator {
         }
         let held_long_enough = self
             .held_since
-            .is_some_and(|t| t.elapsed() >= GESTURE_HOLD_FOR_SWIPE);
-        if held_long_enough && let Some(dir) = detect_swipe(self.dx, self.dy) {
+            .is_some_and(|t| t.elapsed() >= self.hold_for_swipe);
+        if held_long_enough
+            && let Some(dir) = detect_swipe_with_threshold(self.dx, self.dy, self.threshold)
+        {
             self.fired = true;
             self.last = Some(dir);
             self.repeat = 0;
@@ -261,7 +318,7 @@ impl SwipeAccumulator {
     #[doc(hidden)]
     pub fn backdate_hold_for_test(&mut self) {
         if self.held_since.is_some() {
-            self.held_since = Instant::now().checked_sub(GESTURE_HOLD_FOR_SWIPE * 2);
+            self.held_since = Instant::now().checked_sub(self.hold_for_swipe * 2);
         }
     }
 
@@ -272,6 +329,12 @@ impl SwipeAccumulator {
         if let Some(moved_at) = self.moved_at {
             self.moved_at = moved_at.checked_sub(GESTURE_REARM_PAUSE * 2);
         }
+    }
+}
+
+impl Default for SwipeAccumulator {
+    fn default() -> Self {
+        Self::with_policy(GESTURE_SWIPE_THRESHOLD, GESTURE_HOLD_FOR_SWIPE, true)
     }
 }
 
@@ -323,6 +386,38 @@ fn continues(direction: GestureDirection, dx: i32, dy: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidpp_accumulator_commits_on_the_first_flick_without_a_hold_gate() {
+        let mut acc = SwipeAccumulator::hidpp_gesture();
+        acc.begin();
+
+        assert_eq!(
+            acc.accumulate(HIDPP_GESTURE_SWIPE_THRESHOLD, 0),
+            Some(GestureDirection::Right)
+        );
+    }
+
+    #[test]
+    fn hidpp_accumulator_commits_once_per_hold() {
+        let mut acc = SwipeAccumulator::hidpp_gesture();
+        acc.begin();
+        assert_eq!(
+            acc.accumulate(HIDPP_GESTURE_SWIPE_THRESHOLD, 0),
+            Some(GestureDirection::Right)
+        );
+        // A wobble back past the low flick threshold must not read as a
+        // second, reversed flick within the same hold.
+        assert_eq!(acc.accumulate(-4 * HIDPP_GESTURE_SWIPE_THRESHOLD, 0), None);
+        assert!(!acc.end(), "a committed flick is not also a click");
+
+        acc.begin();
+        assert_eq!(
+            acc.accumulate(-HIDPP_GESTURE_SWIPE_THRESHOLD, 0),
+            Some(GestureDirection::Left),
+            "the next physical hold commits afresh"
+        );
+    }
 
     // ── Gesture classification ────────────────────────────────────────────────
 
