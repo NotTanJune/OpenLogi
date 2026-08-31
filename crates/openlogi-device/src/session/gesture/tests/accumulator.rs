@@ -248,12 +248,13 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
-    // Past the stale report, so the travel below reaches the accumulator and
-    // only the hold-time gate stands between it and a swipe.
+    // Past the stale report, so the travel below reaches the accumulator.
     stale_report(&mut acc, &tx);
     handle_reprog(
         &mut acc,
-        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        // Small incidental movement stays below the dedicated button's
+        // immediate-flick threshold and must remain a tap.
+        RawControlEvent::RawXy { dx: 4, dy: 1 },
         GESTURE,
         &[],
         &[],
@@ -271,6 +272,64 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
     assert!(
         next_gesture(&mut rx).is_err(),
         "a quick tap emits exactly one click"
+    );
+}
+
+#[test]
+fn a_dedicated_gesture_commits_on_the_first_flick_without_a_hold_gate() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    stale_report(&mut acc, &tx);
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        )),
+        "a clean first flick should commit without waiting for a stationary hold"
+    );
+}
+
+#[test]
+fn a_dedicated_gesture_commits_one_flick_per_hold() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    stale_report(&mut acc, &tx);
+    for dx in [120, -120, 120] {
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy { dx, dy: 0 },
+            GESTURE,
+            &[],
+            &[],
+            &tx,
+        );
+    }
+    handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        ))
+    );
+    assert!(
+        next_gesture(&mut rx).is_err(),
+        "the return stroke within the same hold must not fire a second flick or a click"
     );
 }
 

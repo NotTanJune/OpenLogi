@@ -43,9 +43,16 @@ enum HoldState {
     },
 }
 
-/// Begin a hold for `cid`, its swipe accumulator started fresh.
+/// Begin a hold for `cid`, its swipe accumulator started fresh with the policy
+/// for its physical source. The dedicated MX gesture button follows Mac Mouse
+/// Fix's immediate one-flick-per-hold behavior; the haptic panel and any other
+/// raw-XY source keep the shared default accumulator.
 fn begin_hold(cid: u16, button: ButtonId, overlap: bool, skip_first_raw_xy: bool) -> HoldState {
-    let mut swipe = SwipeAccumulator::default();
+    let mut swipe = if button == ButtonId::GestureButton {
+        SwipeAccumulator::hidpp_gesture()
+    } else {
+        SwipeAccumulator::default()
+    };
     swipe.begin();
     HoldState::Holding {
         cid,
