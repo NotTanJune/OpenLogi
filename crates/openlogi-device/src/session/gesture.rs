@@ -119,17 +119,33 @@ struct CaptureAccum {
     overlap: bool,
     /// The armed gesture sources held in the last event, for edge detection:
     /// a source not previously held that becomes the holder is a fresh touch
-    /// (the haptic panel's first sample is then a contact jump to discard).
+    /// (its first raw-XY report is discarded before motion is accumulated).
     gestures_down: Vec<u16>,
-    /// Whether the current hold's next raw-XY sample must be dropped: the
-    /// haptic panel's first sample after contact is an absolute position
-    /// jump, not a delta (see [`reprog_controls::HAPTIC_PANEL_CID`]).
+    /// Whether the current hold's next raw-XY sample must be dropped. HID++
+    /// can deliver a contact/transition report at the front of a fresh hold;
+    /// treating that report as travel is what can make a rapid repeated flick
+    /// commit in the opposite direction.
     skip_first_raw_xy: bool,
     /// Whether any DPI/ModeShift control was held in the last event — for
     /// rising-edge press detection.
     dpi_down: bool,
     /// Diverted standard-button CIDs held in the last event.
     buttons_down: Vec<u16>,
+}
+
+impl CaptureAccum {
+    /// Start a hold with the policy for its physical source. The dedicated MX
+    /// gesture button follows Mac Mouse Fix's immediate first-flick behavior;
+    /// the haptic panel and any future raw-XY source keep the conservative
+    /// hold gate used by the shared default accumulator.
+    fn begin_gesture(&mut self, button: ButtonId) {
+        self.swipe = if button == ButtonId::GestureButton {
+            SwipeAccumulator::hidpp_gesture()
+        } else {
+            SwipeAccumulator::default()
+        };
+        self.swipe.begin();
+    }
 }
 
 /// HID++-divertable standard buttons: the `0x1b04` control ID and the
@@ -680,15 +696,17 @@ fn handle_reprog(
                     }
                     // ...and the first still-held source begins (or takes
                     // over) the hold. A source not down in the previous event
-                    // is a fresh touch, so the panel's contact-jump discard
-                    // applies; one that was already held has had its jump
-                    // dropped during the overlap.
+                    // is a fresh touch, so discard its first raw-XY report;
+                    // one that was already held has already passed its
+                    // contact transition.
                     if let Some(&(cid, button)) = held.first() {
                         acc.gesture_source = Some((cid, button));
-                        acc.swipe.begin();
+                        acc.begin_gesture(button);
                         acc.overlap = held.len() > 1;
-                        acc.skip_first_raw_xy = cid == reprog_controls::HAPTIC_PANEL_CID
-                            && !acc.gestures_down.contains(&cid);
+                        acc.skip_first_raw_xy = matches!(
+                            cid,
+                            reprog_controls::GESTURE_BUTTON_CID | reprog_controls::HAPTIC_PANEL_CID
+                        ) && !acc.gestures_down.contains(&cid);
                     }
                 }
             }
@@ -742,15 +760,16 @@ fn handle_reprog(
             if acc.overlap {
                 return;
             }
-            // The haptic panel's first sample after contact is a position
-            // jump; summing it would commit a bogus direction instantly.
+            // The first report after a fresh HID++ contact can be a transition
+            // offset rather than the user's flick; summing it can commit a
+            // bogus direction instantly.
             if acc.skip_first_raw_xy {
                 acc.skip_first_raw_xy = false;
                 return;
             }
             // Commit the instant a clean direction emerges (mid-swipe, once per
-            // hold); the accumulator gates on hold duration internally and drops
-            // travel that arrives outside a hold.
+            // hold); the source-specific accumulator applies its travel and
+            // optional hold-duration policy, and drops travel outside a hold.
             if let Some(direction) = acc.swipe.accumulate(i32::from(dx), i32::from(dy)) {
                 debug!(?direction, %button, "gesture committed");
                 let _ = sink.send(CapturedInput::Gesture(button, direction));

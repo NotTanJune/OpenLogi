@@ -724,12 +724,16 @@ fn binding_label_for_control(
     bindings: &std::collections::BTreeMap<ButtonId, Action>,
     gesture_buttons: &[ButtonId],
 ) -> BindingLabel {
-    if control
+    if let Some(button) = control
         .button()
-        .is_some_and(|button| gesture_buttons.contains(&button))
+        .filter(|button| gesture_buttons.contains(button))
     {
         return BindingLabel {
-            text: tr!("5 directions"),
+            text: if button == ButtonId::GestureButton {
+                tr!("2 directions")
+            } else {
+                tr!("5 directions")
+            },
             icon: Some(GESTURE_BUTTON_ICON),
         };
     }

@@ -1579,9 +1579,11 @@ fn gesture_maps_cover_every_gesture_mode_button() {
         .get(&ButtonId::GestureButton)
         .expect("the dedicated button's default gesture mode must be shown");
     assert!(
-        dedicated.contains_key(&GestureDirection::Up),
-        "HID++ maps are shown seeded, matching watcher dispatch"
+        dedicated.contains_key(&GestureDirection::Left)
+            && dedicated.contains_key(&GestureDirection::Right),
+        "the dedicated HID++ map exposes its two horizontal slots"
     );
+    assert!(!dedicated.contains_key(&GestureDirection::Up));
     assert!(
         maps.contains_key(&ButtonId::Back),
         "a promoted OS-hook button gets its own menu simultaneously"

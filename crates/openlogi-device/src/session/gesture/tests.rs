@@ -141,6 +141,16 @@ fn raw_xy_during_a_two_source_overlap_is_dropped_not_misattributed() {
 
     handle_reprog(&mut acc, press(), BOTH, &[], &[], &tx);
     acc.swipe.backdate_hold_for_test();
+    // Consume the fresh-contact report before the second source overlaps the
+    // holder; overlap motion itself remains dropped below.
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 0, dy: 0 },
+        BOTH,
+        &[],
+        &[],
+        &tx,
+    );
     handle_reprog(&mut acc, both_press(), BOTH, &[], &[], &tx);
     handle_reprog(
         &mut acc,
@@ -234,7 +244,9 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     handle_reprog(
         &mut acc,
-        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        // Small incidental movement stays below the dedicated button's
+        // immediate-flick threshold and must remain a tap.
+        RawControlEvent::RawXy { dx: 4, dy: 1 },
         GESTURE,
         &[],
         &[],
@@ -256,6 +268,41 @@ fn quick_tap_is_a_click_even_while_the_cursor_moves() {
 }
 
 #[test]
+fn a_dedicated_gesture_commits_on_the_first_flick_without_a_hold_gate() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+    // The first HID++ report after contact is a transition sample. The real
+    // flick that follows still commits immediately, without a hold gate.
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 0, dy: 0 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 120, dy: 5 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+
+    assert_eq!(
+        next_gesture(&mut rx),
+        Ok(CapturedInput::Gesture(
+            ButtonId::GestureButton,
+            GestureDirection::Right
+        )),
+        "a clean first flick should commit without waiting for a stationary hold"
+    );
+}
+
+#[test]
 fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
@@ -263,6 +310,14 @@ fn a_held_gesture_commits_a_swipe_and_does_not_also_click() {
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     // Pretend the button has been held well past the swipe gate.
     acc.swipe.backdate_hold_for_test();
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: 0, dy: 0 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -395,14 +450,27 @@ fn the_panels_first_raw_xy_sample_after_contact_is_discarded() {
 }
 
 #[test]
-fn the_dedicated_buttons_first_sample_is_not_discarded() {
-    // The discard is a panel quirk: the dedicated button's raw-XY stream is
-    // relative from the first sample, which must keep committing as-is.
+fn the_dedicated_buttons_first_contact_sample_is_discarded() {
+    // A rapid re-press can begin with a transition offset from the previous
+    // contact. Discarding it keeps the dedicated button from committing the
+    // opposite direction before the real flick arrives.
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut acc = CaptureAccum::default();
 
     handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
     acc.swipe.backdate_hold_for_test();
+    handle_reprog(
+        &mut acc,
+        RawControlEvent::RawXy { dx: -120, dy: 5 },
+        GESTURE,
+        &[],
+        &[],
+        &tx,
+    );
+    assert!(
+        next_gesture(&mut rx).is_err(),
+        "the dedicated button's contact sample must not commit"
+    );
     handle_reprog(
         &mut acc,
         RawControlEvent::RawXy { dx: 120, dy: 5 },
@@ -418,8 +486,54 @@ fn the_dedicated_buttons_first_sample_is_not_discarded() {
             ButtonId::GestureButton,
             GestureDirection::Right
         )),
-        "the dedicated button's very first sample still counts"
+        "the first real flick after contact still commits without a hold gate"
     );
+}
+
+#[test]
+fn repeated_right_flicks_ignore_a_reversed_contact_sample() {
+    // A fast re-press can leave one raw-XY report from the previous contact at
+    // the front of the new hold. It must not turn a right flick into a left
+    // action before the real rightward motion arrives.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut acc = CaptureAccum::default();
+
+    for _ in 0..2 {
+        handle_reprog(&mut acc, press(), GESTURE, &[], &[], &tx);
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy { dx: -120, dy: 5 },
+            GESTURE,
+            &[],
+            &[],
+            &tx,
+        );
+        assert!(
+            next_gesture(&mut rx).is_err(),
+            "the reversed contact sample must not commit the opposite direction"
+        );
+
+        handle_reprog(
+            &mut acc,
+            RawControlEvent::RawXy { dx: 120, dy: 5 },
+            GESTURE,
+            &[],
+            &[],
+            &tx,
+        );
+        assert_eq!(
+            next_gesture(&mut rx),
+            Ok(CapturedInput::Gesture(
+                ButtonId::GestureButton,
+                GestureDirection::Right
+            ))
+        );
+        handle_reprog(&mut acc, release(), GESTURE, &[], &[], &tx);
+        assert!(
+            next_gesture(&mut rx).is_err(),
+            "a committed flick must not also click on release"
+        );
+    }
 }
 
 #[test]

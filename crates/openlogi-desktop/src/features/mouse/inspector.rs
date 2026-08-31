@@ -199,7 +199,9 @@ fn button_inspector(
                                 state.commit_gesture_mode(button, true);
                             });
                             observer.update(cx, |view, cx| {
-                                view.set_gesture_selected_dir(Some(GestureDirection::Click));
+                                view.set_gesture_selected_dir(Some(default_gesture_direction(
+                                    button,
+                                )));
                                 cx.notify();
                             });
                         }),
@@ -241,7 +243,7 @@ fn inherited_gesture_inspector(
             Some(tr!("Inherited from Default")),
             pal,
         ))
-        .child(gesture_summary_card(picker, pal))
+        .child(gesture_summary_card(button, picker, pal))
         .child(div().text_caption().text_color(pal.text_muted).child(tr!(
             "Choosing an action replaces the inherited gestures in %{app}.",
             app => app.to_string()
@@ -254,7 +256,7 @@ fn inherited_gesture_inspector(
                 .on_click(move |_, _, cx| {
                     AppState::update_bindings(cx, |state| state.set_editing_app(None));
                     edit_default.update(cx, |view, cx| {
-                        view.set_gesture_selected_dir(Some(GestureDirection::Click));
+                        view.set_gesture_selected_dir(Some(default_gesture_direction(button)));
                         cx.notify();
                     });
                 }),
@@ -271,6 +273,26 @@ fn inherited_gesture_inspector(
         })
 }
 
+fn gesture_direction_is_visible(button: ButtonId, direction: GestureDirection) -> bool {
+    button != ButtonId::GestureButton || GestureDirection::LEFT_RIGHT.contains(&direction)
+}
+
+fn default_gesture_direction(button: ButtonId) -> GestureDirection {
+    if button == ButtonId::GestureButton {
+        GestureDirection::Left
+    } else {
+        GestureDirection::Click
+    }
+}
+
+fn gesture_direction_count_label(button: ButtonId) -> gpui::SharedString {
+    if button == ButtonId::GestureButton {
+        tr!("2 directions")
+    } else {
+        tr!("5 directions")
+    }
+}
+
 fn gesture_inspector(
     button: ButtonId,
     gesture_map: &BTreeMap<GestureDirection, Action>,
@@ -279,7 +301,9 @@ fn gesture_inspector(
     pal: Palette,
     cx: &Context<MouseModelView>,
 ) -> gpui::Div {
-    let direction = selected_direction.unwrap_or(GestureDirection::Click);
+    let direction = selected_direction
+        .filter(|direction| gesture_direction_is_visible(button, *direction))
+        .unwrap_or_else(|| default_gesture_direction(button));
     let current = gesture_action(gesture_map, button, direction);
     let observer = picker.view.clone();
     let on_pick: PickFn = Rc::new(move |action, _window, cx| {
@@ -297,7 +321,7 @@ fn gesture_inspector(
         .gap_3()
         .child(inspector_heading(
             tr!(button.label()),
-            Some(tr!("5 directions")),
+            Some(gesture_direction_count_label(button)),
             pal,
         ))
         .child(gesture_directions(
@@ -347,6 +371,7 @@ fn gesture_directions(
         .children(
             GestureDirection::ALL
                 .into_iter()
+                .filter(|direction| gesture_direction_is_visible(button, *direction))
                 .enumerate()
                 .map(|(index, direction)| {
                     let selected = direction == active;
@@ -524,12 +549,16 @@ fn current_action_card(
     )
 }
 
-fn gesture_summary_card(picker: ActionPickerContext<'_>, pal: Palette) -> impl IntoElement {
+fn gesture_summary_card(
+    button: ButtonId,
+    picker: ActionPickerContext<'_>,
+    pal: Palette,
+) -> impl IntoElement {
     selection_card(
         "inspector-current-gesture-summary",
         tr!("Current action"),
         GESTURE_BUTTON_ICON,
-        tr!("5 directions"),
+        gesture_direction_count_label(button),
         picker,
         pal,
     )

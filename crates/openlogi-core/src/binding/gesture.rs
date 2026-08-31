@@ -39,6 +39,11 @@ impl GestureDirection {
         GestureDirection::Click,
     ];
 
+    /// The only swipe slots exposed by the dedicated HID++ gesture button.
+    /// The full [`Self::ALL`] set remains available to OS-hook gesture buttons
+    /// and the MX Master 4 haptic panel.
+    pub const LEFT_RIGHT: [GestureDirection; 2] = [GestureDirection::Left, GestureDirection::Right];
+
     /// Human-readable label for popovers and tooltips.
     #[must_use]
     pub fn label(self) -> &'static str {

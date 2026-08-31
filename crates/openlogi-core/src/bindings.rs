@@ -64,9 +64,11 @@ pub fn button_bindings_for(
 /// Per-direction maps for every HID++ gesture source (the dedicated gesture
 /// button, the MX Master 4 haptic panel) in gesture mode on `config_key`,
 /// keyed by the button its captured swipes dispatch as. Each map is seeded
-/// via [`Binding::fill_gesture_defaults`] — the one canonical seeding rule —
-/// so the watcher always dispatches the full five-direction set the GUI
-/// shows. Empty when no HID++ source gestures (or `config_key` is `None`).
+/// via [`Binding::fill_gesture_defaults`] — the one canonical seeding rule.
+/// The dedicated button is projected to its two horizontal swipe slots; the
+/// stored vertical/click entries remain readable for backwards compatibility
+/// but are no longer effective. Empty when no HID++ source gestures (or
+/// `config_key` is `None`).
 #[must_use]
 pub fn hidpp_gesture_maps_for(
     config: &Config,
@@ -89,7 +91,12 @@ pub fn hidpp_gesture_maps_for(
                 .unwrap_or_else(|| default_binding_for(button));
             binding.fill_gesture_defaults();
             match binding {
-                Binding::Gesture(map) => Some((button, map)),
+                Binding::Gesture(mut map) => {
+                    if button == ButtonId::GestureButton {
+                        map.retain(|direction, _| GestureDirection::LEFT_RIGHT.contains(direction));
+                    }
+                    Some((button, map))
+                }
                 Binding::Single(_) | Binding::LongPress(_) => None,
             }
         })
@@ -275,14 +282,19 @@ mod tests {
         cfg.set_gesture_mode("2b042", ButtonId::HapticPanel, true);
 
         let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
-        // The dedicated button gestures by default...
+        // The dedicated button gestures by default, but only horizontally...
         let dedicated = maps
             .get(&ButtonId::GestureButton)
             .expect("the dedicated button's default gesture mode must survive");
         assert_eq!(
-            dedicated.get(&GestureDirection::Up),
-            Some(&default_gesture_binding(GestureDirection::Up))
+            dedicated.get(&GestureDirection::Left),
+            Some(&default_gesture_binding(GestureDirection::Left))
         );
+        assert_eq!(
+            dedicated.get(&GestureDirection::Right),
+            Some(&default_gesture_binding(GestureDirection::Right))
+        );
+        assert!(!dedicated.contains_key(&GestureDirection::Up));
         // ...and the panel's promotion adds a second, fully-seeded map.
         let panel = maps
             .get(&ButtonId::HapticPanel)
@@ -290,6 +302,23 @@ mod tests {
         for dir in GestureDirection::ALL {
             assert!(panel.contains_key(&dir), "unseeded panel arm {dir:?}");
         }
+    }
+
+    #[test]
+    fn dedicated_hidpp_gesture_map_exposes_only_horizontal_swipes() {
+        let cfg = Config::default();
+        let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
+        let dedicated = maps
+            .get(&ButtonId::GestureButton)
+            .expect("the dedicated button gestures by default");
+
+        assert_eq!(
+            dedicated.keys().copied().collect::<Vec<_>>(),
+            vec![GestureDirection::Left, GestureDirection::Right]
+        );
+        assert!(!dedicated.contains_key(&GestureDirection::Up));
+        assert!(!dedicated.contains_key(&GestureDirection::Down));
+        assert!(!dedicated.contains_key(&GestureDirection::Click));
     }
 
     #[test]
@@ -330,8 +359,8 @@ mod tests {
         let maps = hidpp_gesture_maps_for(&cfg, Some("2b042"));
         assert_eq!(
             maps.get(&ButtonId::GestureButton)
-                .and_then(|m| m.get(&GestureDirection::Up)),
-            Some(&default_gesture_binding(GestureDirection::Up)),
+                .and_then(|m| m.get(&GestureDirection::Left)),
+            Some(&default_gesture_binding(GestureDirection::Left)),
             "the dedicated button gestures by default, seeded"
         );
 
