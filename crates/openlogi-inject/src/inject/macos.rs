@@ -1251,23 +1251,305 @@ mod dock {
 )]
 mod symbolic_hotkey {
     use std::ffi::{c_int, c_uint, c_ushort, c_void};
+    use std::sync::{LazyLock, Mutex};
+    use std::time::{Duration, Instant};
 
+    use core_foundation::array::CFArray;
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::CFString;
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use dispatch2::DispatchQueue;
 
     use super::app_services_symbol;
 
     const SPACE_LEFT: u32 = 79;
     const SPACE_RIGHT: u32 = 81;
+    /// macOS normally completes a Space animation in well under this window.
+    /// A reverse request inside it is treated as a cancellation of the last
+    /// target rather than another symbolic-hotkey tap, which WindowServer can
+    /// otherwise defer until the current animation finishes.
+    const SPACE_REVERSAL_WINDOW: Duration = Duration::from_millis(900);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SpaceDirection {
+        Previous,
+        Next,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct PendingSpaceSwitch {
+        direction: SpaceDirection,
+        /// The Space the last request was intended to reach. Tracking the
+        /// target, rather than only the observed current Space, also works
+        /// while WindowServer is still animating the first request.
+        target: u64,
+        started_at: Instant,
+    }
+
+    static PENDING_SPACE_SWITCH: LazyLock<Mutex<Option<PendingSpaceSwitch>>> =
+        LazyLock::new(|| Mutex::new(None));
 
     /// Switch to the previous desktop / Space.
     pub(super) fn previous_desktop() {
-        post_symbolic_hotkey(SPACE_LEFT);
+        dispatch_space(SpaceDirection::Previous, SPACE_LEFT);
     }
 
     /// Switch to the next desktop / Space.
     pub(super) fn next_desktop() {
-        post_symbolic_hotkey(SPACE_RIGHT);
+        dispatch_space(SpaceDirection::Next, SPACE_RIGHT);
+    }
+
+    fn dispatch_space(direction: SpaceDirection, fallback_hotkey: u32) {
+        if should_hop_to_appkit_main_thread(is_appkit_main_thread()) {
+            // The agent's HID/action runtime runs off the process main thread,
+            // while AppKit owns the main-thread WindowServer connection. Run
+            // the complete snapshot + direct-set operation there; resolving a
+            // connection on the worker can return a success code without
+            // interrupting the visible Space transition.
+            DispatchQueue::main().exec_sync(move || {
+                dispatch_space_on_appkit_thread(direction, fallback_hotkey);
+            });
+        } else {
+            dispatch_space_on_appkit_thread(direction, fallback_hotkey);
+        }
+    }
+
+    fn should_hop_to_appkit_main_thread(on_appkit_main_thread: bool) -> bool {
+        !on_appkit_main_thread
+    }
+
+    fn is_appkit_main_thread() -> bool {
+        // SAFETY: `pthread_main_np` is a libSystem query with no arguments and
+        // is available on every supported macOS release.
+        unsafe { pthread_main_np() != 0 }
+    }
+
+    unsafe extern "C" {
+        fn pthread_main_np() -> c_int;
+    }
+
+    fn dispatch_space_on_appkit_thread(direction: SpaceDirection, fallback_hotkey: u32) {
+        let now = Instant::now();
+        let Some(api) = cgs_space_api() else {
+            post_symbolic_hotkey(fallback_hotkey);
+            return;
+        };
+        let Some(snapshot) = copy_active_space(&api) else {
+            post_symbolic_hotkey(fallback_hotkey);
+            return;
+        };
+
+        let mut pending = PENDING_SPACE_SWITCH
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let recent = (*pending).filter(|request| {
+            now.saturating_duration_since(request.started_at) <= SPACE_REVERSAL_WINDOW
+        });
+
+        if let Some(request) = recent
+            && request.direction != direction
+            && let Some(target) = reversal_target(&request, direction, &snapshot.spaces)
+            && set_current_space(&api, &snapshot, target)
+        {
+            tracing::info!(
+                ?direction,
+                target,
+                "reversed macOS Space transition directly"
+            );
+            *pending = None;
+            return;
+        }
+
+        post_symbolic_hotkey(fallback_hotkey);
+
+        let base = recent
+            .filter(|request| request.direction == direction)
+            .map(|request| request.target)
+            .filter(|target| snapshot.spaces.contains(target))
+            .unwrap_or(snapshot.current);
+        *pending =
+            neighbor_space(&snapshot.spaces, base, direction).map(|target| PendingSpaceSwitch {
+                direction,
+                target,
+                started_at: now,
+            });
+    }
+
+    fn neighbor_space(spaces: &[u64], current: u64, direction: SpaceDirection) -> Option<u64> {
+        let index = spaces.iter().position(|space| *space == current)?;
+        match direction {
+            SpaceDirection::Previous => index.checked_sub(1).and_then(|i| spaces.get(i)),
+            SpaceDirection::Next => spaces.get(index + 1),
+        }
+        .copied()
+    }
+
+    fn reversal_target(
+        request: &PendingSpaceSwitch,
+        direction: SpaceDirection,
+        spaces: &[u64],
+    ) -> Option<u64> {
+        (request.direction != direction)
+            .then(|| neighbor_space(spaces, request.target, direction))
+            .flatten()
+    }
+
+    struct SpaceSnapshot {
+        connection: c_uint,
+        display: CFString,
+        spaces: Vec<u64>,
+        current: u64,
+    }
+
+    fn copy_active_space(api: &CgsSpaceApi) -> Option<SpaceSnapshot> {
+        // SAFETY: `main_connection` is resolved from ApplicationServices and
+        // has the private CGSMainConnectionID signature declared below.
+        let connection = unsafe { (api.main_connection)() };
+        if connection == 0 {
+            return None;
+        }
+
+        // SAFETY: the resolved function returns an owned CFStringRef under
+        // the Copy rule; it is wrapped below only when non-null.
+        let active_display = unsafe { (api.copy_active_display)(connection) };
+        let active_display = if active_display.is_null() {
+            None
+        } else {
+            // SAFETY: the pointer is non-null and follows the Copy rule.
+            Some(unsafe { CFString::wrap_under_create_rule(active_display.cast()) })
+        };
+        // SAFETY: the resolved function returns an owned CFArrayRef under the
+        // Copy rule; it is checked before wrapping.
+        let managed_displays = unsafe { (api.copy_managed_displays)(connection) };
+        if managed_displays.is_null() {
+            return None;
+        }
+        // SAFETY: the pointer is non-null and follows the Copy rule.
+        let managed_displays: CFArray =
+            unsafe { TCFType::wrap_under_create_rule(managed_displays.cast()) };
+
+        let display_key = CFString::from_static_string("Display Identifier");
+        let current_key = CFString::from_static_string("Current Space");
+        let spaces_key = CFString::from_static_string("Spaces");
+        let space_id_key = CFString::from_static_string("ManagedSpaceID");
+
+        for index in 0..managed_displays.len() {
+            let display = dictionary_at(&managed_displays, index)?;
+            let display_id = dict_value(&display, &display_key)?.downcast::<CFString>()?;
+            if active_display
+                .as_ref()
+                .is_some_and(|active| active != &display_id)
+            {
+                continue;
+            }
+            let current = dict_value(&display, &current_key)?.downcast::<CFDictionary>()?;
+            let current = space_id(&current, &space_id_key)?;
+            let spaces = dict_value(&display, &spaces_key)?.downcast::<CFArray>()?;
+            let spaces = (0..spaces.len())
+                .filter_map(|i| dictionary_at(&spaces, i))
+                .filter_map(|space| space_id(&space, &space_id_key))
+                .collect::<Vec<_>>();
+            if spaces.is_empty() || !spaces.contains(&current) {
+                continue;
+            }
+            return Some(SpaceSnapshot {
+                connection,
+                display: display_id,
+                spaces,
+                current,
+            });
+        }
+        None
+    }
+
+    fn dictionary_at(array: &CFArray, index: isize) -> Option<CFDictionary> {
+        let raw = *array.get(index)?;
+        if raw.is_null() {
+            return None;
+        }
+        // SAFETY: the array element is a live Core Foundation dictionary
+        // retained for this wrapper's lifetime by the Get rule.
+        Some(unsafe { CFDictionary::wrap_under_get_rule(raw.cast()) })
+    }
+
+    fn dict_value(dictionary: &CFDictionary, key: &CFString) -> Option<CFType> {
+        let raw = *dictionary.find(key.as_CFTypeRef().cast())?;
+        if raw.is_null() {
+            return None;
+        }
+        // SAFETY: the dictionary owns this live Core Foundation value; the
+        // Get rule retains it for the returned wrapper.
+        Some(unsafe { CFType::wrap_under_get_rule(raw.cast()) })
+    }
+
+    fn space_id(dictionary: &CFDictionary, key: &CFString) -> Option<u64> {
+        dict_value(dictionary, key)?
+            .downcast::<CFNumber>()?
+            .to_i64()
+            .and_then(|id| u64::try_from(id).ok())
+    }
+
+    fn set_current_space(api: &CgsSpaceApi, snapshot: &SpaceSnapshot, target: u64) -> bool {
+        // SAFETY: the resolved private function accepts the connection,
+        // borrowed display identifier, and managed-space ID exactly as passed.
+        let error = unsafe {
+            (api.set_current_space)(
+                snapshot.connection,
+                snapshot.display.as_concrete_TypeRef().cast(),
+                target,
+            )
+        };
+        if error != 0 {
+            tracing::warn!(error, target, "CGSManagedDisplaySetCurrentSpace failed");
+            return false;
+        }
+        true
+    }
+
+    #[derive(Clone, Copy)]
+    struct CgsSpaceApi {
+        main_connection: CgsMainConnectionIdFn,
+        copy_managed_displays: CgsCopyManagedDisplaySpacesFn,
+        copy_active_display: CgsCopyActiveDisplayIdentifierFn,
+        set_current_space: CgsManagedDisplaySetCurrentSpaceFn,
+    }
+
+    type CgsMainConnectionIdFn = unsafe extern "C" fn() -> c_uint;
+    type CgsCopyManagedDisplaySpacesFn = unsafe extern "C" fn(c_uint) -> *const c_void;
+    type CgsCopyActiveDisplayIdentifierFn = unsafe extern "C" fn(c_uint) -> *const c_void;
+    type CgsManagedDisplaySetCurrentSpaceFn =
+        unsafe extern "C" fn(c_uint, *const c_void, u64) -> c_int;
+
+    fn cgs_space_api() -> Option<CgsSpaceApi> {
+        let main_connection = app_services_symbol(c"CGSMainConnectionID")?;
+        let copy_managed_displays = app_services_symbol(c"CGSCopyManagedDisplaySpaces")?;
+        let copy_active_display = app_services_symbol(c"CGSCopyActiveMenuBarDisplayIdentifier")?;
+        let set_current_space = app_services_symbol(c"CGSManagedDisplaySetCurrentSpace")?;
+
+        // SAFETY: these are the documented private SkyLight signatures used by
+        // macOS' own Space manager; every symbol is checked before casting.
+        Some(unsafe {
+            CgsSpaceApi {
+                main_connection: std::mem::transmute::<*mut c_void, CgsMainConnectionIdFn>(
+                    main_connection,
+                ),
+                copy_managed_displays: std::mem::transmute::<
+                    *mut c_void,
+                    CgsCopyManagedDisplaySpacesFn,
+                >(copy_managed_displays),
+                copy_active_display: std::mem::transmute::<
+                    *mut c_void,
+                    CgsCopyActiveDisplayIdentifierFn,
+                >(copy_active_display),
+                set_current_space: std::mem::transmute::<
+                    *mut c_void,
+                    CgsManagedDisplaySetCurrentSpaceFn,
+                >(set_current_space),
+            }
+        })
     }
 
     fn post_symbolic_hotkey(hotkey: u32) {
@@ -1372,5 +1654,30 @@ mod symbolic_hotkey {
                 ),
             }
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn opposite_space_request_targets_the_space_before_the_last_target() {
+            let pending = PendingSpaceSwitch {
+                direction: SpaceDirection::Next,
+                target: 3,
+                started_at: Instant::now(),
+            };
+
+            assert_eq!(
+                reversal_target(&pending, SpaceDirection::Previous, &[1, 2, 3, 4]),
+                Some(2)
+            );
+        }
+
+        #[test]
+        fn space_spi_hops_to_appkit_main_thread_from_worker_thread() {
+            assert!(!should_hop_to_appkit_main_thread(true));
+            assert!(should_hop_to_appkit_main_thread(false));
+        }
     }
 }

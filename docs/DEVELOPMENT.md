@@ -16,6 +16,11 @@ build instructions, see the [README](../README.md).
 - `create-dmg` for packaging (`brew install create-dmg`); `cargo-bundle` is
   installed automatically by `cargo run -p xtask -- macos bundle`
 
+If you only need to run the HID++ gesture agent on macOS and do not have
+Xcode's Metal Toolchain, see [the CLT-only gesture build and persistence
+guide](MACOS-NO-XCODE-GESTURE-BUILD.md). It keeps the stock GUI as the app shell
+and replaces only the embedded agent.
+
 ## Building from source
 
 Nix/devenv is optional. A normal Rust toolchain is enough.
