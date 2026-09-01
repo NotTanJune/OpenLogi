@@ -1273,6 +1273,26 @@ mod symbolic_hotkey {
     /// otherwise defer until the current animation finishes.
     const SPACE_REVERSAL_WINDOW: Duration = Duration::from_millis(900);
 
+    // Private CGEvent fields consumed by Dock's horizontal Space-swipe path.
+    const DOCK_CONTROL_FIELD: u32 = 55;
+    const GESTURE_HID_TYPE_FIELD: u32 = 110;
+    const GESTURE_SWIPE_MOTION_FIELD: u32 = 123;
+    const GESTURE_SWIPE_PROGRESS_FIELD: u32 = 124;
+    const GESTURE_SWIPE_VELOCITY_X_FIELD: u32 = 129;
+    const GESTURE_PHASE_FIELD: u32 = 132;
+    const DOCK_CONTROL_SPACE_SWITCH: i64 = 30;
+    const DOCK_SWIPE_HID_TYPE: i64 = 23;
+    const HORIZONTAL_SWIPE: i64 = 1;
+    const GESTURE_BEGAN: i64 = 1;
+    const GESTURE_CHANGED: i64 = 2;
+    const GESTURE_ENDED: i64 = 4;
+
+    #[derive(Clone, Copy, Debug)]
+    struct AnimatedReversalProfile {
+        progress: f64,
+        velocity_x: f64,
+    }
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum SpaceDirection {
         Previous,
@@ -1352,15 +1372,25 @@ mod symbolic_hotkey {
         if let Some(request) = recent
             && request.direction != direction
             && let Some(target) = reversal_target(&request, direction, &snapshot.spaces)
-            && set_current_space(&api, &snapshot, target)
         {
-            tracing::info!(
-                ?direction,
-                target,
-                "reversed macOS Space transition directly"
-            );
-            *pending = None;
-            return;
+            if post_animated_space_gesture(direction) {
+                tracing::info!(
+                    ?direction,
+                    target,
+                    "reversed macOS Space transition with animated Dock gesture"
+                );
+                *pending = None;
+                return;
+            }
+            if set_current_space(&api, &snapshot, target) {
+                tracing::info!(
+                    ?direction,
+                    target,
+                    "reversed macOS Space transition directly after gesture fallback"
+                );
+                *pending = None;
+                return;
+            }
         }
 
         post_symbolic_hotkey(fallback_hotkey);
@@ -1376,6 +1406,51 @@ mod symbolic_hotkey {
                 target,
                 started_at: now,
             });
+    }
+
+    fn animated_reversal_profile(direction: SpaceDirection) -> AnimatedReversalProfile {
+        let sign = match direction {
+            SpaceDirection::Previous => -1.0,
+            SpaceDirection::Next => 1.0,
+        };
+        AnimatedReversalProfile {
+            // A small Changed phase interrupts the in-flight transition but
+            // leaves most of the distance for Dock's normal settle animation.
+            progress: sign * 0.18,
+            // Unlike yabai's 9999 skip-animation velocity, this asks Dock to
+            // complete the partial swipe at a normal interactive speed.
+            velocity_x: sign,
+        }
+    }
+
+    fn post_animated_space_gesture(direction: SpaceDirection) -> bool {
+        let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+            tracing::warn!("CGEventSource::new failed for Space gesture reversal");
+            return false;
+        };
+        let Ok(event) = CGEvent::new(source) else {
+            tracing::warn!("CGEvent::new failed for Space gesture reversal");
+            return false;
+        };
+
+        let profile = animated_reversal_profile(direction);
+        event.set_integer_value_field(DOCK_CONTROL_FIELD, DOCK_CONTROL_SPACE_SWITCH);
+        event.set_integer_value_field(GESTURE_HID_TYPE_FIELD, DOCK_SWIPE_HID_TYPE);
+        event.set_integer_value_field(GESTURE_SWIPE_MOTION_FIELD, HORIZONTAL_SWIPE);
+
+        event.set_double_value_field(GESTURE_SWIPE_PROGRESS_FIELD, 0.0);
+        event.set_double_value_field(GESTURE_SWIPE_VELOCITY_X_FIELD, 0.0);
+        event.set_integer_value_field(GESTURE_PHASE_FIELD, GESTURE_BEGAN);
+        event.post(CGEventTapLocation::Session);
+
+        event.set_double_value_field(GESTURE_SWIPE_PROGRESS_FIELD, profile.progress);
+        event.set_double_value_field(GESTURE_SWIPE_VELOCITY_X_FIELD, profile.velocity_x);
+        event.set_integer_value_field(GESTURE_PHASE_FIELD, GESTURE_CHANGED);
+        event.post(CGEventTapLocation::Session);
+
+        event.set_integer_value_field(GESTURE_PHASE_FIELD, GESTURE_ENDED);
+        event.post(CGEventTapLocation::Session);
+        true
     }
 
     fn neighbor_space(spaces: &[u64], current: u64, direction: SpaceDirection) -> Option<u64> {
@@ -1678,6 +1753,19 @@ mod symbolic_hotkey {
         fn space_spi_hops_to_appkit_main_thread_from_worker_thread() {
             assert!(!should_hop_to_appkit_main_thread(true));
             assert!(should_hop_to_appkit_main_thread(false));
+        }
+
+        #[test]
+        fn reversal_gesture_uses_partial_progress_and_animated_release_velocity() {
+            let previous = animated_reversal_profile(SpaceDirection::Previous);
+            let next = animated_reversal_profile(SpaceDirection::Next);
+
+            assert_eq!(previous.progress, -0.18);
+            assert_eq!(next.progress, 0.18);
+            assert_eq!(previous.velocity_x, -1.0);
+            assert_eq!(next.velocity_x, 1.0);
+            assert!(previous.progress.abs() < 1.0);
+            assert!(previous.velocity_x.abs() < 10.0);
         }
     }
 }

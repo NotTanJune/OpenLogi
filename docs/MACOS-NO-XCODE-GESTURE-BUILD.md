@@ -34,6 +34,20 @@ No Xcode installation, Apple Developer account, Developer ID certificate, or
 notarization is required. The local bundle is ad-hoc signed for macOS code-sign
 and TCC consistency; it is not a distributable notarized release.
 
+## Install the prebuilt gesture release
+
+The fork's GitHub Releases page contains `OpenLogi-gesture-button-flicks-macos-arm64.zip`.
+It is the ad-hoc-signed application bundle produced by this workflow. Download
+the ZIP, verify its published SHA-256 checksum, quit OpenLogi, and replace
+`/Applications/OpenLogi.app` with the extracted app. Because the signature is
+local rather than Apple-notarized, macOS may require **Open Anyway** on first
+launch and may require the nested **OpenLogi Agent** to be re-added under Input
+Monitoring and Accessibility as described below.
+
+The release tag points at the exact source revision used by the packaged agent.
+The GUI shell remains the upstream application; the nested agent contains the
+gesture-button and interruptible animated Space-transition behavior.
+
 ## Build the custom agent
 
 From the repository root:
@@ -169,12 +183,16 @@ per physical hold and treats an uncommitted release as a click.
 On macOS, `PreviousDesktop` and `NextDesktop` first use the user's configured
 symbolic hotkey, preserving the normal Space animation. If the opposite Space
 request arrives within the 900 ms reversal window, the agent reads the active
-display's ordered Space IDs through the private CoreGraphics/SkyLight symbols
-and directly selects the Space before the last requested target. The complete
-snapshot-and-select operation is hopped from the agent's HID worker to
-AppKit's main thread; otherwise macOS can return success without interrupting
-the visible animation. If those private symbols or the active Space snapshot
-are unavailable, the existing symbolic hotkey path remains the fallback.
+display's ordered Space IDs through the private CoreGraphics/SkyLight symbols.
+It then posts a private Dock swipe sequence with Began, partial Changed, and
+moderate-velocity Ended phases. Starting a fresh interactive swipe interrupts
+the in-flight transition; leaving most of its progress unfinished lets Dock
+smoothly animate the remainder in the opposite direction instead of jumping.
+The complete snapshot-and-event operation is hopped from the agent's HID
+worker to AppKit's main thread; otherwise macOS can return success without
+interrupting the visible animation. If the event cannot be created, the
+private managed-space setter is attempted, and the existing symbolic hotkey
+path remains the final fallback.
 
 ## Verification checklist
 
