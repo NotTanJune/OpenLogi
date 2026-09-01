@@ -341,10 +341,28 @@ fn reconcile_table(current: &mut Table, generated: &Table) {
         current.remove(&key);
     }
     for (key, generated_item) in generated {
+        let moves_value_to_table = current
+            .get(key)
+            .is_some_and(|item| item.as_value().is_some())
+            && generated_item.as_table().is_some();
+        let key_decor = moves_value_to_table
+            .then(|| current.key(key).map(|key| key.leaf_decor().clone()))
+            .flatten();
         if let Some(current_item) = current.get_mut(key) {
             reconcile_item(current_item, generated_item);
         } else {
             current.insert(key, generated_item.clone());
+        }
+        if let Some(decor) = key_decor {
+            // A comment before an inline value is stored on the parent key.
+            // Once the value becomes a table, that key is rendered inside the
+            // table header, so move the comment to the table's header decor.
+            if let Some(mut key) = current.key_mut(key) {
+                key.leaf_decor_mut().clear();
+            }
+            if let Some(table) = current.get_mut(key).and_then(Item::as_table_mut) {
+                *table.decor_mut() = decor;
+            }
         }
     }
 }
@@ -354,9 +372,12 @@ fn reconcile_item(current: &mut Item, generated: &Item) {
         reconcile_table(current, generated);
         return;
     }
-    let decor = current.as_value().map(|value| value.decor().clone());
+    let value_decor = current.as_value().map(|value| value.decor().clone());
+    let table_decor = current.as_table().map(|table| table.decor().clone());
     *current = generated.clone();
-    if let (Some(decor), Some(value)) = (decor, current.as_value_mut()) {
+    if let (Some(decor), Some(value)) = (value_decor, current.as_value_mut()) {
+        *value.decor_mut() = decor;
+    } else if let (Some(decor), Some(value)) = (table_decor, current.as_value_mut()) {
         *value.decor_mut() = decor;
     }
 }

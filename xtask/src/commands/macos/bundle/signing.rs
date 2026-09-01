@@ -35,12 +35,20 @@ pub(super) fn local_sign_app_if_available(channel: Channel) -> Result<()> {
     }
 
     println!(
-        "==> local codesign: skipped (no Apple Development identity found;          set OPENLOGI_LOCAL_CODESIGN_IDENTITY or OPENLOGI_SIGN_IDENTITY to sign)"
+        "==> local codesign: ad-hoc (no Apple Development identity found;          set OPENLOGI_LOCAL_CODESIGN_IDENTITY or OPENLOGI_SIGN_IDENTITY to sign)"
     );
-    println!(
-        "    warning: an unsigned bundle is re-signed ad-hoc on every build, so its own Accessibility grant goes stale each time"
-    );
+    ad_hoc_sign_app(channel)?;
+    println!("    warning: an ad-hoc bundle's Accessibility grant goes stale on every rebuild");
     Ok(())
+}
+
+/// Sign every bundle component ad hoc after embedding has changed its contents.
+///
+/// This keeps a locally built bundle internally consistent when no signing
+/// identity is available. Its designated requirement is cdhash-based, so TCC
+/// grants must be renewed after every rebuild.
+pub(super) fn ad_hoc_sign_app(channel: Channel) -> Result<()> {
+    sign_app_with_timestamp("-", TimestampMode::None, channel)
 }
 
 pub(super) fn sign_app_with_timestamp(

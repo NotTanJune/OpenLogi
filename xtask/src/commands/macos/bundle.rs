@@ -70,7 +70,10 @@ fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()>
     {
         let gui_dir = root.join("crates/openlogi-desktop");
         let _gui = sh.push_dir(gui_dir);
-        cmd!(sh, "cargo bundle --release")
+        // Request only the app. cargo-bundle's default also attempts to make
+        // a DMG before xtask can embed and sign the helpers, which can fail on
+        // hosts where hdiutil is unavailable even though the app built.
+        cmd!(sh, "cargo bundle --release --format osx")
             .envs(xcode_env.iter().map(|(key, value)| (key, value)))
             .run()?;
     }
@@ -94,7 +97,8 @@ fn run_with_channel(channel: Channel, sign_identity: Option<&str>) -> Result<()>
             signing::sign_app_with_timestamp(identity, signing::TimestampMode::Secure, channel)?;
         }
         (Channel::Production, None) => {
-            println!("==> codesign: skipped (unsigned — set OPENLOGI_SIGN_IDENTITY to sign)");
+            println!("==> codesign: ad-hoc (set OPENLOGI_SIGN_IDENTITY to use a Developer ID)");
+            signing::ad_hoc_sign_app(channel)?;
         }
         (Channel::Dev, _) => signing::local_sign_app_if_available(channel)?,
     }

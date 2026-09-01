@@ -1237,6 +1237,30 @@ fn tracked_save_preserves_comments_and_rejects_concurrent_edits() {
 }
 
 #[test]
+fn tracked_save_of_inline_action_with_comment_keeps_valid_toml() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    fs::write(
+        &path,
+        "schema_version = 6\n\n[devices.\"2b042\".bindings]\n# keep this binding\nBack = { CustomShortcut = \"Cmd+P\" }\n",
+    )
+    .expect("write");
+
+    let (config, mut file) = ConfigFile::load_from_path(&path).expect("load tracked");
+    file.save(&config).expect("save tracked");
+
+    let saved = fs::read_to_string(&path).expect("read saved");
+    assert!(
+        toml::from_str::<Config>(&saved).is_ok(),
+        "saved config must remain parseable: {saved}"
+    );
+    assert!(
+        saved.contains("# keep this binding"),
+        "comment was lost: {saved}"
+    );
+}
+
+#[test]
 fn set_gesture_direction_upgrades_single_to_gesture() {
     let mut cfg = Config::default();
     // Start from a Single binding, then bind a swipe direction.

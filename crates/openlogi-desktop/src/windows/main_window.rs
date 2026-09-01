@@ -13,6 +13,7 @@ use openlogi_core::device::DeviceInventory;
 use tracing::warn;
 
 use crate::app::AppView;
+use crate::state::AppState;
 use crate::ui::theme;
 use crate::windows::{WindowRegistry, titlebar_options};
 
@@ -41,6 +42,13 @@ fn window_options(cx: &mut App) -> WindowOptions {
 
 /// Open the main window — or focus the one already open.
 pub fn open(inventories: &[DeviceInventory], cx: &mut App) {
+    // macOS can deliver the dock/reopen event while the asynchronous runtime
+    // is still bootstrapping. Do not call the window builders until the shared
+    // state exists because both the theme and AppView read it during setup.
+    if AppState::try_global(cx).is_none() {
+        warn!("ignoring main-window reopen until application state is initialized");
+        return;
+    }
     let existing = cx.default_global::<WindowRegistry>().main;
     if let Some(handle) = existing
         && handle

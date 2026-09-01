@@ -1251,6 +1251,8 @@ mod dock {
 )]
 mod symbolic_hotkey {
     use std::ffi::{c_int, c_uint, c_ushort, c_void};
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
     use std::sync::{LazyLock, Mutex};
     use std::time::{Duration, Instant};
 
@@ -1286,6 +1288,8 @@ mod symbolic_hotkey {
     const GESTURE_BEGAN: i64 = 1;
     const GESTURE_CHANGED: i64 = 2;
     const GESTURE_ENDED: i64 = 4;
+    const STRAFE_CONTROL_SOCKET: &str = "/tmp/strafe.sock";
+    const STRAFE_CONTROL_TIMEOUT: Duration = Duration::from_millis(5);
 
     #[derive(Clone, Copy, Debug)]
     struct AnimatedReversalProfile {
@@ -1323,6 +1327,11 @@ mod symbolic_hotkey {
     }
 
     fn dispatch_space(direction: SpaceDirection, fallback_hotkey: u32) {
+        if delegate_to_strafe(direction) {
+            tracing::debug!(?direction, "delegated Space switch to strafe");
+            return;
+        }
+
         if should_hop_to_appkit_main_thread(is_appkit_main_thread()) {
             // The agent's HID/action runtime runs off the process main thread,
             // while AppKit owns the main-thread WindowServer connection. Run
@@ -1334,6 +1343,31 @@ mod symbolic_hotkey {
             });
         } else {
             dispatch_space_on_appkit_thread(direction, fallback_hotkey);
+        }
+    }
+
+    /// Reuse Strafe's live transition-speed selection when its menu-bar app is
+    /// running. A failed connection or response deliberately falls through to
+    /// OpenLogi's existing native Space-switch implementation.
+    fn delegate_to_strafe(direction: SpaceDirection) -> bool {
+        let Ok(mut stream) = UnixStream::connect(STRAFE_CONTROL_SOCKET) else {
+            return false;
+        };
+
+        let _ = stream.set_read_timeout(Some(STRAFE_CONTROL_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(STRAFE_CONTROL_TIMEOUT));
+        if stream.write_all(strafe_control_command(direction)).is_err() {
+            return false;
+        }
+
+        let mut response = [0_u8; 3];
+        stream.read_exact(&mut response).is_ok() && response == *b"ok\n"
+    }
+
+    fn strafe_control_command(direction: SpaceDirection) -> &'static [u8] {
+        match direction {
+            SpaceDirection::Previous => b"switch left\n",
+            SpaceDirection::Next => b"switch right\n",
         }
     }
 
@@ -1760,12 +1794,24 @@ mod symbolic_hotkey {
             let previous = animated_reversal_profile(SpaceDirection::Previous);
             let next = animated_reversal_profile(SpaceDirection::Next);
 
-            assert_eq!(previous.progress, -0.18);
-            assert_eq!(next.progress, 0.18);
-            assert_eq!(previous.velocity_x, -1.0);
-            assert_eq!(next.velocity_x, 1.0);
+            assert!((previous.progress + 0.18).abs() < 1e-12);
+            assert!((next.progress - 0.18).abs() < 1e-12);
+            assert!((previous.velocity_x + 1.0).abs() < 1e-12);
+            assert!((next.velocity_x - 1.0).abs() < 1e-12);
             assert!(previous.progress.abs() < 1.0);
             assert!(previous.velocity_x.abs() < 10.0);
+        }
+
+        #[test]
+        fn strafe_control_commands_match_space_directions() {
+            assert_eq!(
+                strafe_control_command(SpaceDirection::Previous),
+                b"switch left\n"
+            );
+            assert_eq!(
+                strafe_control_command(SpaceDirection::Next),
+                b"switch right\n"
+            );
         }
     }
 }

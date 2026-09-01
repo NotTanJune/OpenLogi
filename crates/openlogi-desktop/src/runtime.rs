@@ -59,20 +59,12 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
             mut deeplinks,
         } = startup;
 
-        // Enumerate webcams off the UI thread: AVFoundation discovery can
-        // stall for hundreds of ms on first touch, which must never block
-        // the first paint (or, below, a snapshot merge mid-render).
-        let cams = cx
-            .background_executor()
-            .spawn(async { openlogi_camera::enumerate_cameras() })
-            .await;
-
-        // Install the shared AppState entity up front, then open the window at
-        // launch; closing it leaves the app live in the menu bar. Start with no
-        // devices and never block startup on HID enumeration — a sleeping or
-        // unresponsive device must not be able to wedge the main thread before
-        // the window opens. The agent's first snapshot wires up devices,
-        // bindings and the hook live.
+        // Install the shared AppState entity before webcam discovery, then open
+        // the window at launch; closing it leaves the app live in the menu bar.
+        // Start with no devices and never block startup on HID or AVFoundation
+        // enumeration — a sleeping device or camera service must not be able to
+        // wedge the first window or a macOS reopen event. The agent's first
+        // snapshot wires up devices, bindings and the hook live.
         let swr = cx.update(|cx| {
             let swr_runtime: Arc<dyn swr_core::Runtime> = Arc::new(GpuiRuntime::new(cx));
             let swr = SwrClient::builder()
@@ -86,7 +78,7 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                         &[],
                         &[],
                         &cache,
-                        &cams,
+                        &[],
                         persistence,
                         ipc_commands,
                     );
@@ -104,6 +96,16 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
             swr
         });
 
+        // Enumerate webcams off the UI thread: AVFoundation discovery can
+        // stall for much longer than expected on first touch, so keep the
+        // future in the event loop instead of awaiting it before IPC. The
+        // first agent snapshot must reach the UI even while camera discovery
+        // is still blocked in CoreMediaIO.
+        let mut camera_discovery = Box::pin(
+            cx.background_executor()
+                .spawn(async { openlogi_camera::enumerate_cameras() }),
+        );
+
         // First launch only: offer to opt in to the update check, since it
         // defaults to off. Marked seen either way so it shows just once.
         cx.update(|cx| {
@@ -120,7 +122,8 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
         std::thread::spawn(assets::cleanup_legacy_glow_pngs);
 
         let (sync_tx, mut sync_done) = tokio::sync::mpsc::unbounded_channel::<bool>();
-        let mut rt = Runtime::new(cams, sync_tx, swr);
+        let mut rt = Runtime::new(Vec::new(), sync_tx, swr);
+        let mut camera_discovery_pending = true;
         let mut camera_scan = Box::pin(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
         // Cleared when the IPC update channel closes (the client thread died),
         // so the select stops polling a closed receiver.
@@ -129,8 +132,8 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
             tokio::select! {
                 update = updates.recv(), if ipc_open => {
                     // `None` means the IPC client thread is gone (runtime /
-                    // thread spawn failure) — without this the window would
-                    // show its connecting spinner forever.
+                    // thread spawn failure) — without this the window
+                    // would show its connecting spinner forever.
                     let Some(update) = update else {
                         ipc_open = false;
                         warn!("IPC update channel closed — agent state unavailable");
@@ -139,19 +142,25 @@ pub(crate) fn spawn(startup: Startup, cx: &mut gpui::App) {
                     };
                     rt.on_agent_update(update, cx);
                 }
+                cameras = &mut camera_discovery, if camera_discovery_pending => {
+                    camera_discovery_pending = false;
+                    camera_scan.set(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
+                    rt.set_cameras(cameras, cx);
+                }
                 // GPUI drives this task on its own executor, never inside a
                 // Tokio runtime, so a `tokio::time::interval` panics the moment
                 // it is built ("there is no reactor running"). The background
-                // executor's timer is what the rest of the app schedules on. It
-                // is armed once and re-armed only after it fires, so a busy IPC
-                // arm cannot keep starving the scan the way a per-iteration
+                // executor's timer is what the rest of the app schedules on.
+                // It is armed once and re-armed only after it fires, so a busy
+                // IPC arm cannot keep starving the scan the way a per-iteration
                 // timer would, and a late tick simply runs late instead of
                 // catching up — the same behaviour `MissedTickBehavior::Delay`
                 // asked for.
-                () = &mut camera_scan => {
+                () = &mut camera_scan, if !camera_discovery_pending => {
                     camera_scan.set(cx.background_executor().timer(CAMERA_SCAN_PERIOD));
                     rt.rescan_cameras(cx).await;
                 }
+
                 Some(cmd) = asset_commands.recv() => rt.on_asset_command(cmd, cx),
                 // Unguarded: we hold a live `sync_tx`, so this arm simply pends
                 // between downloads. The old guard existed to let `else => break`
@@ -218,6 +227,22 @@ impl Runtime {
             sync_tx,
             inventories: Vec::new(),
             standalone: Vec::new(),
+        }
+    }
+
+    /// Install the initial camera result and re-merge the latest agent state.
+    /// Camera discovery can finish before or after the first IPC snapshot.
+    fn set_cameras(&mut self, cams: Vec<Camera>, cx: &AsyncApp) {
+        if cams == self.cams {
+            return;
+        }
+        self.camera_misses = 0;
+        self.cams = cams;
+        // Taken and put back rather than borrowed: the merge needs the rest of
+        // `self` mutably, and cloning a snapshot copies the whole device list.
+        if let Some(snapshot) = self.snapshot.take() {
+            self.apply_snapshot(&snapshot, cx);
+            self.snapshot = Some(snapshot);
         }
     }
 

@@ -180,19 +180,31 @@ fresh-contact raw-XY reports are discarded so a rapid re-press cannot invent an
 opposite direction. The shared accumulator still commits at most one gesture
 per physical hold and treats an uncommitted release as a click.
 
-On macOS, `PreviousDesktop` and `NextDesktop` first use the user's configured
-symbolic hotkey, preserving the normal Space animation. If the opposite Space
-request arrives within the 900 ms reversal window, the agent reads the active
-display's ordered Space IDs through the private CoreGraphics/SkyLight symbols.
-It then posts a private Dock swipe sequence with Began, partial Changed, and
-moderate-velocity Ended phases. Starting a fresh interactive swipe interrupts
-the in-flight transition; leaving most of its progress unfinished lets Dock
-smoothly animate the remainder in the opposite direction instead of jumping.
-The complete snapshot-and-event operation is hopped from the agent's HID
-worker to AppKit's main thread; otherwise macOS can return success without
-interrupting the visible animation. If the event cannot be created, the
-private managed-space setter is attempted, and the existing symbolic hotkey
-path remains the final fallback.
+When Strafe is not running, `PreviousDesktop` and `NextDesktop` use the user's
+configured symbolic hotkey, preserving the normal Space animation. If the
+opposite Space request arrives within the 900 ms reversal window, the agent
+reads the active display's ordered Space IDs through the private
+CoreGraphics/SkyLight symbols. It then posts a private Dock swipe sequence with
+Began, partial Changed, and moderate-velocity Ended phases. Starting a fresh
+interactive swipe interrupts the in-flight transition; leaving most of its
+progress unfinished lets Dock smoothly animate the remainder in the opposite
+direction instead of jumping. The complete snapshot-and-event operation is
+hopped from the agent's HID worker to AppKit's main thread; otherwise macOS can
+return success without interrupting the visible animation. If the event cannot
+be created, the private managed-space setter is attempted, and the existing
+symbolic hotkey path remains the final fallback.
+
+When the Strafe menu-bar app is running, the same two actions first send
+`switch left` or `switch right` to Strafe's owner-only `/tmp/strafe.sock`
+endpoint. Strafe then applies its currently selected Transition Speed to the
+synthetic Dock gesture. If the endpoint is unavailable or rejects the request,
+OpenLogi uses the native path described above.
+
+For a complete cross-machine setup, see the [Strafe integration guide](https://github.com/tanmay-nargas/strafe/blob/main/docs/OPENLOGI-INTEGRATION.md).
+The committed `artifacts/OpenLogi.app` bundle in this fork contains the same
+agent integration for a quick install. Any ad-hoc-signed replacement creates a
+new macOS TCC identity, so grant Input Monitoring to **OpenLogi Agent** and
+restart OpenLogi before testing the gesture button.
 
 ## Verification checklist
 

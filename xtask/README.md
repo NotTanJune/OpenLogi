@@ -45,16 +45,17 @@ written explicitly and read back:
 
 `macos bundle` defaults to `--channel dev`, so a local build can never claim the
 installed app's grants, and signs the result with `OPENLOGI_LOCAL_CODESIGN_IDENTITY`
-or the first Apple Development identity it finds (`OPENLOGI_LOCAL_CODESIGN=0`
-leaves it unsigned). `macos package` always builds the production channel and
+or the first Apple Development identity it finds. When no signing identity is
+available, it ad-hoc signs every component after embedding so the local bundle
+passes signature verification; that cdhash-based TCC identity changes on every
+rebuild. `OPENLOGI_LOCAL_CODESIGN=0` leaves a dev bundle unsigned. `macos package` always builds the production channel and
 signs with `OPENLOGI_SIGN_IDENTITY` / `--sign-identity`; `macos dmg` refuses to
 package anything but a production bundle once it is given a signing identity, so
 a dev build cannot reach users. That check is what releases 0.6.24–0.6.26 lacked
 when the release workflow shipped `.dev` identifiers.
 
-The raw DMG emitted by `cargo-bundle` is deleted during `macos bundle` because it
-is created before xtask embeds and signs the helpers; use `macos package` when
-you need a DMG.
+`macos bundle` asks `cargo-bundle` for the app only. The helper embedding and
+signing must finish before `macos package` creates a DMG.
 
 ### The dev bundle
 
