@@ -7,10 +7,10 @@ use crate::ui::theme::Typography as _;
 use openlogi_hook::Hook;
 
 #[cfg(debug_assertions)]
-use super::AppState;
+use super::{AppState, IntoElement, Palette};
 use super::{
-    App, Axis, IconName, IntoElement, Palette, ParentElement, SettingField, SettingGroup,
-    SettingItem, SettingPage, Styled, div, v_flex,
+    App, Axis, IconName, ParentElement, SettingField, SettingGroup, SettingItem, SettingPage, Styled,
+    div, v_flex,
 };
 
 /// The Diagnostics page: the curated input-conflict check, plus (debug) the raw
