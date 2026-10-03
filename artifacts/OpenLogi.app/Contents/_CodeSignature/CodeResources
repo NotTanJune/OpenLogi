@@ -6,11 +6,11 @@
 	<dict>
 		<key>Resources/AppIcon.icns</key>
 		<data>
-		MUuxj3f/NqvUBRg7/gB4FICqA1M=
+		t8GcbECUoUWSKWpTM9ZSiVq16qQ=
 		</data>
 		<key>Resources/Assets.car</key>
 		<data>
-		B086msyBzSJTAgXN+YG3XgSWhlY=
+		O3NfdTyvvpv2xa05fqZgqoPTMFA=
 		</data>
 		<key>Resources/Icons/openlogi.png</key>
 		<data>
@@ -31,41 +31,41 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			YjurUagIQYWfIua1usik+JkVR1U=
+			hrf1mkWcU60XqD4ZFQV8n2Lcpro=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"623bab51a80841859f22e6b5bac8a4f899154755"</string>
+			<string>cdhash H"86b7f59a459c53ad17a83e1915057c9f62dca6ba"</string>
 		</dict>
 		<key>Library/LoginItems/OpenLogi Overlay.app</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			iYdh8Rr0hJGQgXEIKIaDA2d1Yew=
+			Q7oYiARDXOfBg4HQimfQZIGUN8s=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"898761f11af484919081710828868303677561ec"</string>
+			<string>cdhash H"43ba188804435ce7c18381d08a67d064819437cb"</string>
 		</dict>
 		<key>MacOS/openlogi</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			4cEFuc1YM9qu/bNweVFfpUQfQB8=
+			d676jNLdd5NTrrFsX0vTNgZkCgI=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"e1c105b9cd5833daaefdb37079515fa5441f401f"</string>
+			<string>cdhash H"77aefa8cd2dd779353aeb16c5f4bd33606640a02"</string>
 		</dict>
 		<key>Resources/AppIcon.icns</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			XWJpStDCqq3qcE1OJ7FCHnayvGRPjQIowss7cOF/yck=
+			JaQExkdWgAtJZ9YpesGkMiptsC24Fn5r1OisHr1LiGU=
 			</data>
 		</dict>
 		<key>Resources/Assets.car</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			zC/7+RY6MhBDkcd1LKsSZRV1aupexb9RAnW1K35Xy98=
+			6Ei5YilC4OuJewm+QdTNgukc9MzMuwjsnY6QYJSeuw0=
 			</data>
 		</dict>
 		<key>Resources/Icons/openlogi.png</key>
