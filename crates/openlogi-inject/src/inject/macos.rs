@@ -1289,7 +1289,7 @@ mod symbolic_hotkey {
     const GESTURE_CHANGED: i64 = 2;
     const GESTURE_ENDED: i64 = 4;
     const STRAFE_CONTROL_SOCKET: &str = "/tmp/strafe.sock";
-    const STRAFE_CONTROL_TIMEOUT: Duration = Duration::from_millis(5);
+    const STRAFE_CONTROL_TIMEOUT: Duration = Duration::from_millis(100);
 
     #[derive(Clone, Copy, Debug)]
     struct AnimatedReversalProfile {
@@ -1812,6 +1812,11 @@ mod symbolic_hotkey {
                 strafe_control_command(SpaceDirection::Next),
                 b"switch right\n"
             );
+        }
+
+        #[test]
+        fn strafe_control_timeout_allows_local_switch_round_trip() {
+            assert!(STRAFE_CONTROL_TIMEOUT >= Duration::from_millis(50));
         }
     }
 }
