@@ -10,6 +10,9 @@ devenv.local.yaml
 
 /target
 
+# Private, verified snapshots of locally installed apps and user settings.
+/.local-state/
+
 # Local reference clone of external-reference — studied for architecture,
 # never copied or vendored. Cloned at the project root for convenience.
 /local-reference/

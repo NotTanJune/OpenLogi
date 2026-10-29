@@ -1,5 +1,8 @@
 # macOS gesture build without Xcode
 
+For the exact locally verified multi-monitor setup, signed recovery artifacts,
+and login/permission state, see [Working display setup](WORKING-DISPLAY-SETUP.md).
+
 This is the tested, local-only workflow for the `feature/gesture-button-flicks`
 branch:
 
@@ -197,8 +200,18 @@ symbolic hotkey path remains the final fallback.
 When the Strafe menu-bar app is running, the same two actions first send
 `switch left` or `switch right` to Strafe's owner-only `/tmp/strafe.sock`
 endpoint. Strafe then applies its currently selected Transition Speed to the
-synthetic Dock gesture. If the endpoint is unavailable or rejects the request,
-OpenLogi uses the native path described above.
+synthetic Dock gesture. If the endpoint is unavailable, OpenLogi uses the
+native path described above. Once connected, Strafe owns that request. A
+rejection (including the first/last Space boundary), timeout, or lost reply
+does not trigger a native retry: that global shortcut can switch the active
+display instead of the display under the pointer, or repeat an already-posted
+switch. OpenLogi logs unacknowledged requests for diagnosis.
+
+For mirrored virtual displays, Strafe must resolve the display under the
+pointer to its mirror set's primary display before looking up Space IDs. The
+physical mirror has a different UUID and does not own a separate Space list.
+The `dl120` helper uses this layout: the DisplayLink output mirrors a virtual
+display, and the virtual display owns the Spaces.
 
 For a complete cross-machine setup, see the [Strafe integration guide](https://github.com/tanmay-nargas/strafe/blob/main/docs/OPENLOGI-INTEGRATION.md).
 The committed `artifacts/OpenLogi.app` bundle in this fork contains the same
