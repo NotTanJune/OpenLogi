@@ -85,3 +85,6 @@ node_modules/
 /.flatpak-builder/
 /build/
 /repo/
+
+# Private, verified snapshots of locally installed apps and user settings.
+/.local-state/
