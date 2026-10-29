@@ -1327,8 +1327,7 @@ mod symbolic_hotkey {
     }
 
     fn dispatch_space(direction: SpaceDirection, fallback_hotkey: u32) {
-        if delegate_to_strafe(direction) {
-            tracing::debug!(?direction, "delegated Space switch to strafe");
+        if delegate_to_strafe(direction, UnixStream::connect(STRAFE_CONTROL_SOCKET)) {
             return;
         }
 
@@ -1347,21 +1346,42 @@ mod symbolic_hotkey {
     }
 
     /// Reuse Strafe's live transition-speed selection when its menu-bar app is
-    /// running. A failed connection or response deliberately falls through to
-    /// OpenLogi's existing native Space-switch implementation.
-    fn delegate_to_strafe(direction: SpaceDirection) -> bool {
-        let Ok(mut stream) = UnixStream::connect(STRAFE_CONTROL_SOCKET) else {
+    /// running. Only an unavailable endpoint permits native fallback. Once
+    /// connected, Strafe owns the request: a rejection can be its per-display
+    /// boundary guard, and a lost acknowledgement can follow a successful post.
+    /// Retrying either through a global hotkey can switch a different display.
+    fn delegate_to_strafe(
+        direction: SpaceDirection,
+        connection: std::io::Result<UnixStream>,
+    ) -> bool {
+        let Ok(mut stream) = connection else {
             return false;
         };
 
-        let _ = stream.set_read_timeout(Some(STRAFE_CONTROL_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(STRAFE_CONTROL_TIMEOUT));
-        if stream.write_all(strafe_control_command(direction)).is_err() {
-            return false;
+        match send_strafe_request(&mut stream, direction) {
+            Ok(()) => tracing::debug!(?direction, "Strafe acknowledged Space switch"),
+            Err(error) => tracing::warn!(
+                ?direction,
+                %error,
+                "Strafe did not acknowledge Space switch; suppressing native retry"
+            ),
         }
+        true
+    }
 
+    fn send_strafe_request(
+        stream: &mut UnixStream,
+        direction: SpaceDirection,
+    ) -> std::io::Result<()> {
+        stream.set_read_timeout(Some(STRAFE_CONTROL_TIMEOUT))?;
+        stream.set_write_timeout(Some(STRAFE_CONTROL_TIMEOUT))?;
+        stream.write_all(strafe_control_command(direction))?;
         let mut response = [0_u8; 3];
-        stream.read_exact(&mut response).is_ok() && response == *b"ok\n"
+        stream.read_exact(&mut response)?;
+        if response != *b"ok\n" {
+            return Err(std::io::Error::other("Strafe rejected the switch request"));
+        }
+        Ok(())
     }
 
     fn strafe_control_command(direction: SpaceDirection) -> &'static [u8] {
@@ -1817,6 +1837,50 @@ mod symbolic_hotkey {
         #[test]
         fn strafe_control_timeout_allows_local_switch_round_trip() {
             assert!(STRAFE_CONTROL_TIMEOUT >= Duration::from_millis(50));
+        }
+
+        #[test]
+        fn unavailable_strafe_endpoint_allows_native_switch() {
+            for kind in [
+                std::io::ErrorKind::NotFound,
+                std::io::ErrorKind::ConnectionRefused,
+            ] {
+                assert!(!delegate_to_strafe(
+                    SpaceDirection::Next,
+                    Err(std::io::Error::from(kind)),
+                ));
+            }
+        }
+
+        #[test]
+        fn strafe_acknowledgement_and_boundary_rejection_both_suppress_native_retry() {
+            for response in [b"ok\n".as_slice(), b"error switch failed\n"] {
+                let (client, mut server) = UnixStream::pair().unwrap();
+                server.write_all(response).unwrap();
+                assert!(delegate_to_strafe(SpaceDirection::Next, Ok(client)));
+                let mut request = String::new();
+                server.read_to_string(&mut request).unwrap();
+                assert_eq!(request, "switch right\n");
+            }
+        }
+
+        #[test]
+        fn missing_strafe_acknowledgement_does_not_repeat_a_delivered_switch() {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            // Keep the peer open without replying, as when Strafe posts a
+            // switch but the acknowledgement misses OpenLogi's deadline.
+            assert!(delegate_to_strafe(SpaceDirection::Previous, Ok(client)));
+            let mut request = String::new();
+            server.read_to_string(&mut request).unwrap();
+            assert_eq!(request, "switch left\n");
+        }
+
+        #[test]
+        fn truncated_strafe_reply_does_not_trigger_native_retry() {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            server.write_all(b"ok").unwrap();
+            server.shutdown(std::net::Shutdown::Write).unwrap();
+            assert!(delegate_to_strafe(SpaceDirection::Next, Ok(client)));
         }
     }
 }
