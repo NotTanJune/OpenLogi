@@ -63,6 +63,9 @@ pub(super) fn next_desktop() {
 }
 
 fn start(direction: Direction) {
+    if super::strafe::delegate(direction) {
+        return;
+    }
     let Some(lease) = Lease::acquire(&BUSY) else {
         tracing::debug!(?direction, "Space switch already pending — skipped");
         return;

@@ -65,6 +65,8 @@ mod scroll;
     reason = "read-only SkyLight SPI and AppKit notification registration require FFI"
 )]
 mod spaces;
+/// Space switches handed to the Strafe menu-bar app when it is running.
+mod strafe;
 /// Screenshots and Space switches, posted through their system symbolic
 /// hotkey records.
 ///
