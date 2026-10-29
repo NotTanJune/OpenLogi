@@ -299,8 +299,10 @@ cmd_status() {
 }
 
 cmd_install_guard() {
-    local self
-    self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+    # Run a private copy, so checking out a branch without this script in the
+    # repository cannot break the guard.
+    local self="$STATE/openlogi-custom.sh"
+    install -m 0755 "$0" "$self"
     cat >"$GUARD_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
