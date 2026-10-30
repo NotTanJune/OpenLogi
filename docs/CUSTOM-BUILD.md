@@ -18,18 +18,21 @@ the installed app (the GUI and agent share a versioned IPC protocol).
 
 The app's main program (`Contents/MacOS/openlogi-desktop`) is
 [openlogi-simple](https://github.com/NotTanJune/openlogi-simple) (private),
-checked out at `~/openlogi-simple`, beside this fork. It is a one-page settings window built from native AppKit
+checked out at `~/openlogi-simple` (`OPENLOGI_CUSTOM_SIMPLE_REPO` overrides
+the location). It is a one-page settings window built from native AppKit
 controls, so it follows the macOS appearance, accent colour, and accessibility
 settings. It replaces upstream's GPUI window; the bundle identity, Dock icon,
 Login Item, and `openlogi://` links are unchanged.
 
 - Scope: buttons, gesture flicks, DPI, SmartShift, scroll direction, Space
-  switching, Auto-raise, and a System / Light / Dark appearance toggle. Camera, lighting, keyboard settings, the Actions
+  switching, Auto-raise, and a System / Light / Dark appearance toggle. The
+  window is 460 points wide and never taller than its contents. Camera, lighting, keyboard settings, the Actions
   Ring editor, per-app profiles, pairing, and Sparkle are left out; the agent
   keeps applying anything already configured for them.
 - It is its own repository and Cargo workspace, so upstream's `Cargo.toml` is
-  never edited. Its path dependencies point at `../OpenLogi`, so it always
-  builds against the same OpenLogi code as the agent. It reuses `openlogi-core` setters and the agent's IPC exactly as
+  never edited. It builds through a git-ignored `openlogi` symlink that `apply`
+  points at this checkout before every build, so it always uses the same
+  OpenLogi code as the agent. It reuses `openlogi-core` setters and the agent's IPC exactly as
   upstream's window does, and includes the agent's Strafe and AutoRaise settings
   modules by path.
 - It takes over the window's process duties: SMAppService registration,
