@@ -116,6 +116,33 @@ cache_stock() {
   printf '%s\n' "$STOCK_DIR/OpenLogi-$version.app"
 }
 
+# Settings the custom build depends on, re-asserted on every guard run so a
+# GUI toggle or an upstream config migration cannot quietly undo them.
+#
+# mouse_profile_target = "focused": since 0.8 the default "pointer" mode runs
+# keyboard actions (Copy, Paste, shortcuts) only when an Accessibility read
+# confirms the hovered window is the focused one. That read has a 100 ms
+# deadline that Chrome often misses, so the press is dropped.
+ensure_settings() {
+  local config="$HOME/.config/openlogi/config.toml"
+  [[ -f "$config" ]] || return 0
+  grep -q '^mouse_profile_target = "focused"$' "$config" && return 0
+  local updated
+  updated=$(awk '
+    /^mouse_profile_target = / { next }
+    { print }
+    /^\[app_settings\]$/ { print "mouse_profile_target = \"focused\"" }
+  ' "$config")
+  grep -q '^mouse_profile_target = "focused"$' <<<"$updated" || {
+    log "could not place mouse_profile_target in $config"
+    return 0
+  }
+  # Write through the existing file so its owner-only mode is kept; the agent
+  # reloads config.toml when it changes.
+  printf '%s\n' "$updated" >"$config"
+  log "set mouse_profile_target = \"focused\" in $config"
+}
+
 latest_cached_stock() {
   find "$STOCK_DIR" -maxdepth 1 -name 'OpenLogi-*.app' -print | sort -V | tail -1
 }
@@ -204,6 +231,7 @@ wait_gone() {
 
 cmd_apply() {
   lock
+  ensure_settings
   local source=${1:-} version
   if [[ -z "$source" ]]; then
     if is_stock "$APP"; then source=$APP; else source=$(latest_cached_stock); fi
@@ -277,6 +305,7 @@ cmd_restore() {
 }
 
 cmd_guard() {
+  ensure_settings
   [[ -d "$APP" ]] || exit 0
   if [[ -d "$LOCK" ]] || is_custom "$APP"; then exit 0; fi
   if is_stock "$APP"; then
