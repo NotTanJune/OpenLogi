@@ -17,27 +17,29 @@ the installed app (the GUI and agent share a versioned IPC protocol).
 ## The settings window (openlogi-simple)
 
 The app's main program (`Contents/MacOS/openlogi-desktop`) is
-`apps/openlogi-simple`, a one-page settings window built from native AppKit
+[openlogi-simple](https://github.com/NotTanJune/openlogi-simple) (private),
+checked out at `~/openlogi-simple`, beside this fork. It is a one-page settings window built from native AppKit
 controls, so it follows the macOS appearance, accent colour, and accessibility
 settings. It replaces upstream's GPUI window; the bundle identity, Dock icon,
 Login Item, and `openlogi://` links are unchanged.
 
 - Scope: buttons, gesture flicks, DPI, SmartShift, scroll direction, Space
-  switching, and Auto-raise. Camera, lighting, keyboard settings, the Actions
+  switching, Auto-raise, and a System / Light / Dark appearance toggle. Camera, lighting, keyboard settings, the Actions
   Ring editor, per-app profiles, pairing, and Sparkle are left out; the agent
   keeps applying anything already configured for them.
-- It is its own Cargo workspace under `apps/`, so upstream's `Cargo.toml` is
-  never edited. It reuses `openlogi-core` setters and the agent's IPC exactly as
+- It is its own repository and Cargo workspace, so upstream's `Cargo.toml` is
+  never edited. Its path dependencies point at `../OpenLogi`, so it always
+  builds against the same OpenLogi code as the agent. It reuses `openlogi-core` setters and the agent's IPC exactly as
   upstream's window does, and includes the agent's Strafe and AutoRaise settings
   modules by path.
 - It takes over the window's process duties: SMAppService registration,
   launching and arming the agent, single instance, and showing the window for
   menu-bar links. Closing the window quits it, as upstream did.
-- `apply` runs its tests and builds it; an update that breaks it keeps the
-  working build. For a dev run beside the installed app:
-  `OPENLOGI_SIMPLE_DEV=1 cargo run --manifest-path apps/openlogi-simple/Cargo.toml`
+- `apply` clones it when `~/openlogi-simple` is missing, runs its tests and
+  builds it; an update that breaks it keeps the working build. For a dev run beside the installed app:
+  `OPENLOGI_SIMPLE_DEV=1 cargo run` in `~/openlogi-simple`
   (an unbundled binary never registers the agent service).
-- `apps/openlogi-simple/src/registration.rs` carries macOS FFI ported from
+- Its `src/registration.rs` carries macOS FFI ported from
   `crates/openlogi-desktop/src/platform/registration/macos.rs`; it is not listed
   in `.agents/rules/objc-ffi.md`, which stays upstream's file.
 - Known gap: an unparseable `config.toml` makes the app exit instead of opening

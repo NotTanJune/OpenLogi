@@ -91,6 +91,3 @@ node_modules/
 
 # Local brainstorming mockups.
 /.superpowers/
-
-# Build output of the custom build's standalone apps.
-/apps/*/target/
