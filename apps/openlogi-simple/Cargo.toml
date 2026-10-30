@@ -1,0 +1,63 @@
+[package]
+name = "openlogi-simple"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A workspace of its own: the custom build adds this app without touching the
+# upstream workspace's Cargo.toml, so upstream rebases never conflict on it.
+[workspace]
+
+[dependencies]
+openlogi-core = { path = "../../crates/openlogi-core" }
+openlogi-ipc = { path = "../../crates/openlogi-ipc" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tarpc = { version = "0.38", features = ["tokio1"] }
+thiserror = "2"
+tracing = "0.1"
+# Spawns the agent under its own macOS TCC identity (the version the upstream
+# GUI uses, crates/openlogi-desktop/Cargo.toml).
+disclaim = "0.1"
+# The macOS FFI surface, at the versions of the upstream workspace's
+# `[workspace.dependencies]` (root Cargo.toml) with the feature sets the
+# upstream GUI's registration module enables.
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = ["NSString", "NSError"] }
+objc2-service-management = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "SMAppService",
+    "SMErrors",
+    "objc2",
+    "objc2-foundation",
+] }
+
+[dev-dependencies]
+openlogi-ipc = { path = "../../crates/openlogi-ipc", features = ["test-support"] }
+tempfile = "3"
+toml = "0.8"
+
+# The upstream workspace's lint table (root Cargo.toml `[workspace.lints]`),
+# copied by value: `workspace = true` cannot reach a workspace this crate is
+# not a member of. Keep it in step with the root table.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+missing_errors_doc = "allow"
+doc_markdown = "allow"
+assert_is_empty = "allow"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+assertions_on_result_states = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
+error_impl_error = "warn"
+exit = "warn"
+or_fun_call = "warn"
+ptr_as_ptr = "warn"
+tests_outside_test_module = "warn"
+undocumented_unsafe_blocks = "warn"
