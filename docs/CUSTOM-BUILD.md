@@ -14,6 +14,16 @@ Only the nested agent is replaced. The GUI, overlay, and Sparkle framework stay
 upstream's binaries, so the patch branch must sit on the same upstream tag as
 the installed app (the GUI and agent share a versioned IPC protocol).
 
+## Settings the guard enforces
+
+`mouse_profile_target = "focused"` in `~/.config/openlogi/config.toml`. Since
+0.8 the default `"pointer"` mode runs keyboard actions (Copy, Paste, shortcuts)
+only after an Accessibility read confirms the hovered window has focus. That
+read has a 100 ms deadline Chrome often misses, so presses were dropped
+(`mouse action target unavailable, moved, or not focused — skipped`). This
+config has no per-app profiles, so focused mode loses nothing. The guard
+re-asserts the setting on every run.
+
 ## Tooling
 
 `scripts/openlogi-custom.sh` owns the whole lifecycle:
