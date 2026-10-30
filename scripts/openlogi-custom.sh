@@ -249,6 +249,17 @@ wait_gone() {
   return 1
 }
 
+# The one-page settings app that replaces upstream's GUI binary. It lives in
+# its own workspace under apps/, so the upstream Cargo.toml is never edited.
+SIMPLE_MANIFEST="$REPO/apps/openlogi-simple/Cargo.toml"
+
+build_simple() {
+  log "testing and building openlogi-simple"
+  cargo test --quiet --manifest-path "$SIMPLE_MANIFEST" >>"$LOG" 2>&1 || die "openlogi-simple tests failed"
+  cargo build --quiet --release --manifest-path "$SIMPLE_MANIFEST" >>"$LOG" 2>&1 ||
+    die "openlogi-simple build failed"
+}
+
 build_helpers() {
   local branch
   branch=$(git -C "$STRAFE_REPO" rev-parse --abbrev-ref HEAD)
@@ -295,6 +306,7 @@ cmd_apply() {
   port_to "$version"
   build_agent
   build_helpers
+  build_simple
 
   local built="$REPO/target/release/openlogi-agent"
   grep -q "$MARKER" "$built" || die "built agent lacks the Strafe delegation"
@@ -308,6 +320,10 @@ cmd_apply() {
   # upstream team only. Without it keys post as CGEvents, as before 0.8.
   rm -f "$STAGE/$AGENT_REL/Contents/embedded.provisionprofile"
   stage_helpers
+  # Replace upstream's GUI binary; the outer signature below seals it under the
+  # bundle's own identifier and entitlements.
+  install -m 0755 "$REPO/apps/openlogi-simple/target/release/openlogi-simple" \
+    "$STAGE/Contents/MacOS/openlogi-desktop"
   codesign --force --options runtime --sign "$SIGN_ID" "$STAGE/$AGENT_REL" >>"$LOG" 2>&1
   codesign --force --options runtime --preserve-metadata=identifier,entitlements \
     --sign "$SIGN_ID" "$STAGE" >>"$LOG" 2>&1
