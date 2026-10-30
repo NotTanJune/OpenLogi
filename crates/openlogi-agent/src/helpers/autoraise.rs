@@ -58,8 +58,9 @@ impl Default for Settings {
 const POLL_MILLIS: u32 = 50;
 /// A comment line, so AutoRaise itself ignores it; only the supervisor reads it.
 const DISABLED_MARKER: &str = "#openlogi-disabled";
-/// OpenLogi's own windows: the Actions Ring must never take focus.
-const IGNORE_APPS: &str = "OpenLogi,OpenLogi Overlay";
+/// The Actions Ring overlay must never take focus. Only the overlay: the
+/// settings window's app is named "OpenLogi" and is raised like any other.
+const IGNORE_APPS: &str = "OpenLogi Overlay";
 
 fn parse(text: &str) -> Settings {
     let mut settings = Settings::default();
@@ -134,7 +135,8 @@ mod tests {
     }
 
     #[test]
-    fn openlogi_windows_never_take_focus() {
-        assert!(render(Settings::default()).contains("ignoreApps=\"OpenLogi,OpenLogi Overlay\""));
+    fn only_the_overlay_is_ignored() {
+        let text = render(Settings::default());
+        assert!(text.contains("ignoreApps=\"OpenLogi Overlay\"\n"), "{text}");
     }
 }

@@ -109,9 +109,9 @@ pub fn spawn() {
             warn!("could not resolve the config directory — helpers disabled");
             return;
         };
-        if helper == Helper::AutoRaise && !autoraise_config_exists() {
-            // AutoRaise falls back to its own defaults without a file; write
-            // ours so the first run already ignores OpenLogi's windows.
+        if helper == Helper::AutoRaise {
+            // Rewrite the file from the stored settings, so a file written by
+            // an older build (or none at all) carries this build's fixed lines.
             if let Err(error) = autoraise::save(autoraise::load()) {
                 warn!(%error, "could not write the AutoRaise config");
             }
@@ -123,14 +123,6 @@ pub fn spawn() {
             warn!(%error, helper = helper.name(), "could not start the helper supervisor");
         }
     }
-}
-
-fn autoraise_config_exists() -> bool {
-    std::env::var_os("HOME").is_some_and(|home| {
-        PathBuf::from(home)
-            .join(".config/AutoRaise/config")
-            .is_file()
-    })
 }
 
 fn supervise(helper: Helper, binary: &Path, directory: &Path) -> ! {
