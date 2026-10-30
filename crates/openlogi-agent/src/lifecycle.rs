@@ -227,6 +227,8 @@ impl Wanted {
         #[cfg(target_os = "macos")]
         armed_session::record();
         overlay::spawn();
+        #[cfg(target_os = "macos")]
+        crate::helpers::spawn();
         prompt_missing_accessibility(capture_mouse_events);
         let virtual_keyboard = VirtualKeyboard::install();
 
