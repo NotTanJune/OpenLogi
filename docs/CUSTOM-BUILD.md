@@ -14,6 +14,35 @@ Only the nested agent is replaced. The GUI, overlay, and Sparkle framework stay
 upstream's binaries, so the patch branch must sit on the same upstream tag as
 the installed app (the GUI and agent share a versioned IPC protocol).
 
+## The settings window (openlogi-simple)
+
+The app's main program (`Contents/MacOS/openlogi-desktop`) is
+`apps/openlogi-simple`, a one-page settings window built from native AppKit
+controls, so it follows the macOS appearance, accent colour, and accessibility
+settings. It replaces upstream's GPUI window; the bundle identity, Dock icon,
+Login Item, and `openlogi://` links are unchanged.
+
+- Scope: buttons, gesture flicks, DPI, SmartShift, scroll direction, Space
+  switching, and Auto-raise. Camera, lighting, keyboard settings, the Actions
+  Ring editor, per-app profiles, pairing, and Sparkle are left out; the agent
+  keeps applying anything already configured for them.
+- It is its own Cargo workspace under `apps/`, so upstream's `Cargo.toml` is
+  never edited. It reuses `openlogi-core` setters and the agent's IPC exactly as
+  upstream's window does, and includes the agent's Strafe and AutoRaise settings
+  modules by path.
+- It takes over the window's process duties: SMAppService registration,
+  launching and arming the agent, single instance, and showing the window for
+  menu-bar links. Closing the window quits it, as upstream did.
+- `apply` runs its tests and builds it; an update that breaks it keeps the
+  working build. For a dev run beside the installed app:
+  `OPENLOGI_SIMPLE_DEV=1 cargo run --manifest-path apps/openlogi-simple/Cargo.toml`
+  (an unbundled binary never registers the agent service).
+- `apps/openlogi-simple/src/registration.rs` carries macOS FFI ported from
+  `crates/openlogi-desktop/src/platform/registration/macos.rs`; it is not listed
+  in `.agents/rules/objc-ffi.md`, which stays upstream's file.
+- Known gap: an unparseable `config.toml` makes the app exit instead of opening
+  with defaults.
+
 ## Bundled helpers
 
 Strafe and AutoRaise ship inside the agent bundle at
