@@ -31,13 +31,15 @@ use objc2::runtime::{AnyObject, NSObject};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
-use objc2_app_kit::NSStatusItem;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSImage, NSRunningApplication, NSWorkspace,
     NSWorkspaceSessionDidBecomeActiveNotification, NSWorkspaceSessionDidResignActiveNotification,
 };
+use objc2_app_kit::{NSMenuItem, NSStatusItem};
 use objc2_foundation::{NSNotification, NSString};
 use openlogi_core::brand::{self, DeeplinkCommand};
+
+use crate::helpers;
 use openlogi_core::config::AppIcon;
 use openlogi_hid::DeviceIoSignal;
 use tracing::{info, warn};
@@ -196,6 +198,18 @@ define_class!(
             open_command(DeeplinkCommand::CheckForUpdates);
         }
 
+        #[unsafe(method(selectHelperSetting:))]
+        fn select_helper_setting(&self, sender: Option<&AnyObject>) {
+            let Some(item) = sender.and_then(|sender| sender.downcast_ref::<NSMenuItem>()) else {
+                return;
+            };
+            if let Some(choice) = helpers::menu::Choice::from_tag(item.tag()) {
+                helpers::menu::apply(choice);
+                // Rebuild so the checkmarks show the stored settings.
+                relocalize();
+            }
+        }
+
         #[unsafe(method(quitOpenLogi:))]
         fn quit_openlogi(&self, _sender: Option<&AnyObject>) {
             quit_agent();
@@ -243,6 +257,7 @@ fn quit_agent() -> ! {
             .output();
     }
     crate::overlay::evict_on_quit();
+    crate::helpers::stop_all();
     info!("menu-bar Quit — requesting graceful agent shutdown");
     let requests = SHUTDOWN_TX.with_borrow(Clone::clone);
     shutdown::request_tray_quit(requests.as_ref(), 0)
@@ -379,6 +394,9 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
     menu.addItem(&show);
     status_item::add_separator(&menu, mtm);
 
+    add_helper_menus(&menu, mtm, target);
+    status_item::add_separator(&menu, mtm);
+
     let settings = status_item::new_action_item(
         mtm,
         &rust_i18n::t!("app.settings_dialog"),
@@ -421,6 +439,75 @@ fn build_menu(mtm: MainThreadMarker, target: &MenuTarget) -> Retained<objc2_app_
     }
     menu.addItem(&quit);
     menu
+}
+
+/// `NSControlStateValueOn`. Spelled out rather than enabling another
+/// `objc2-app-kit` feature: the custom build keeps `Cargo.toml` untouched so
+/// upstream rebases stay conflict-free.
+const MENU_ITEM_ON: isize = 1;
+
+/// The custom build's "Space switching" and "Auto-raise" submenus. Titles are
+/// English literals for the same reason the locale catalogs stay untouched.
+fn add_helper_menus(menu: &objc2_app_kit::NSMenu, mtm: MainThreadMarker, target: &MenuTarget) {
+    use helpers::autoraise::{self, Delay};
+    use helpers::menu::Choice;
+    use helpers::strafe::{self, Speed};
+
+    let choice_item = |title: &str, choice: Choice, on: bool| {
+        let item = status_item::new_action_item(mtm, title, sel!(selectHelperSetting:), target, "");
+        item.setTag(choice.tag());
+        if on {
+            // SAFETY: `setState:` takes an `NSControlStateValue` (NSInteger),
+            // and `item` is a live menu item on the main thread.
+            let () = unsafe { msg_send![&item, setState: MENU_ITEM_ON] };
+        }
+        item
+    };
+    let submenu = |title: &str, items: Vec<Retained<NSMenuItem>>| {
+        let sub = status_item::new_menu(mtm);
+        for item in &items {
+            sub.addItem(item);
+        }
+        let parent =
+            status_item::new_action_item(mtm, title, sel!(selectHelperSetting:), target, "");
+        parent.setSubmenu(Some(&sub));
+        menu.addItem(&parent);
+    };
+
+    let speed = strafe::speed();
+    let mut space = Speed::ALL
+        .into_iter()
+        .map(|candidate| {
+            choice_item(
+                candidate.title(),
+                Choice::Speed(candidate),
+                candidate == speed,
+            )
+        })
+        .collect::<Vec<_>>();
+    space.push(NSMenuItem::separatorItem(mtm));
+    space.push(choice_item(
+        "Ctrl+Option+Arrow Hotkeys",
+        Choice::ToggleHotkeys,
+        strafe::hotkeys(),
+    ));
+    submenu("Space Switching", space);
+
+    let raise = autoraise::load();
+    let mut auto = vec![
+        choice_item("Enabled", Choice::ToggleAutoRaise, raise.enabled),
+        NSMenuItem::separatorItem(mtm),
+    ];
+    auto.extend(Delay::ALL.into_iter().map(|candidate| {
+        let item = choice_item(
+            candidate.title(),
+            Choice::Delay(candidate),
+            candidate == raise.delay,
+        );
+        item.setEnabled(raise.enabled);
+        item
+    }));
+    submenu("Auto-Raise Windows", auto);
 }
 
 #[cfg(test)]

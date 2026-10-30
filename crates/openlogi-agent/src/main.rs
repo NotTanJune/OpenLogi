@@ -19,6 +19,9 @@
 mod activity_macos;
 mod autostart;
 mod binary_watch;
+/// The custom build's bundled Strafe and AutoRaise helpers.
+#[cfg(target_os = "macos")]
+mod helpers;
 #[cfg(target_os = "macos")]
 mod input_monitoring;
 mod lifecycle;
