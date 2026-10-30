@@ -88,3 +88,9 @@ node_modules/
 
 # Private, verified snapshots of locally installed apps and user settings.
 /.local-state/
+
+# Local brainstorming mockups.
+/.superpowers/
+
+# Build output of the custom build's standalone apps.
+/apps/*/target/
