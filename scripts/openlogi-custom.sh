@@ -381,11 +381,13 @@ cmd_update() {
 # logs; every update check retries an unpublished branch.
 publish_fork() {
   local repo=$1 branch=$2 remote tag covered=""
-  git -C "$repo" fetch --quiet origin "$branch" >>"$LOG" 2>&1 || {
+  # A private ref, so a clone whose origin refspec omits this branch works.
+  local ref="refs/openlogi-custom/github/$branch"
+  git -C "$repo" fetch --quiet origin "+refs/heads/$branch:$ref" >>"$LOG" 2>&1 || {
     log "WARNING: could not reach GitHub for $branch of $repo; will retry"
     return 0
   }
-  remote=$(git -C "$repo" rev-parse "origin/$branch")
+  remote=$(git -C "$repo" rev-parse "$ref")
   [[ "$remote" == "$(git -C "$repo" rev-parse "$branch")" ]] && return 0
   if git -C "$repo" merge-base --is-ancestor "$remote" "$branch"; then
     covered=fast-forward
