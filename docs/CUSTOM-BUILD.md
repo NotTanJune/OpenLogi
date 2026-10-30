@@ -20,7 +20,7 @@ the installed app (the GUI and agent share a versioned IPC protocol).
 0.8 the default `"pointer"` mode runs keyboard actions (Copy, Paste, shortcuts)
 only after an Accessibility read confirms the hovered window has focus. That
 read has a 100 ms deadline Chrome often misses, so presses were dropped
-(`mouse action target unavailable, moved, or not focused — skipped`). This
+(the agent logs `mouse action target unavailable, moved, or not focused`). This
 config has no per-app profiles, so focused mode loses nothing. The guard
 re-asserts the setting on every run.
 
