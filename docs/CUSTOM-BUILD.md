@@ -14,6 +14,30 @@ Only the nested agent is replaced. The GUI, overlay, and Sparkle framework stay
 upstream's binaries, so the patch branch must sit on the same upstream tag as
 the installed app (the GUI and agent share a versioned IPC protocol).
 
+## Bundled helpers
+
+Strafe and AutoRaise ship inside the agent bundle at
+`OpenLogi Agent.app/Contents/Helpers/{strafe,autoraise}`; there is no separate
+Strafe or AutoRaise app, Login Item, or privacy row.
+
+- The agent starts both at arming as its own children (`strafe serve`, the
+  headless mode from `NotTanJune/strafe`), so they run on the agent's
+  Accessibility grant. `succession` restarts a helper that exits (1 s, doubling
+  to 60 s, reset after 30 s of healthy running). launchd ends them with the
+  agent's job; a helper left by an abrupt exit is evicted before the next start.
+- Settings live on OpenLogi's menu-bar icon: **Space Switching** (transition
+  speed, Ctrl+Option+Arrow hotkeys) and **Auto-Raise Windows** (on/off, delay).
+  Each is stored by its own tool: Strafe's `com.rileycx.strafe` defaults and
+  `~/.config/AutoRaise/config` (rewritten by the menu). A change restarts only
+  that helper.
+- AutoRaise is GPL-3.0 and stays a separate executable built from
+  `NotTanJune/AutoRaise`; its license ships as
+  `Contents/Resources/AutoRaise-LICENSE.md`.
+- Helper output: `~/.local/state/openlogi/helper-{strafe,autoraise}.log`.
+- Differences from the design spec: restarts back off to 60 s indefinitely
+  instead of stopping after five crashes, and the menu does not show an
+  "unavailable" state.
+
 ## Settings the guard enforces
 
 `mouse_profile_target = "focused"` in `~/.config/openlogi/config.toml`. Since
@@ -31,7 +55,7 @@ re-asserts the setting on every run.
 | Command | Effect |
 |---|---|
 | `status` | installed version, custom or stock, recorded build, guard state |
-| `apply [APP]` | rebase the patch branch onto the app's tag if needed, run the focused tests, build the agent, re-sign, install, relaunch |
+| `apply [APP]` | rebase the patch branch onto the app's tag if needed, run the focused tests, build the agent and both helpers, re-sign, install, relaunch, and refresh the guard's script copy |
 | `update` | download the latest upstream DMG with `gh`, then `apply` it |
 | `restore` | reinstall the last verified custom bundle |
 | `install-guard` / `uninstall-guard` | manage the launchd guard |
