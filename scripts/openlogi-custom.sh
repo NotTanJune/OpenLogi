@@ -43,9 +43,9 @@ STRAFE_REPO="${OPENLOGI_CUSTOM_STRAFE_REPO:-$HOME/strafe}"
 STRAFE_BRANCH="${OPENLOGI_CUSTOM_STRAFE_BRANCH:-fix/macos27-direction-openlogi}"
 AUTORAISE_REPO="${OPENLOGI_CUSTOM_AUTORAISE_REPO:-$HOME/AutoRaise}"
 # The one-page settings app that replaces upstream's GUI binary, in its own
-# repository. Its Cargo path dependencies point at ../OpenLogi, so it must be
-# checked out beside $REPO.
-SIMPLE_REPO="$(dirname "$REPO")/openlogi-simple"
+# repository. It builds against the OpenLogi checkout its git-ignored
+# `openlogi` symlink names; build_simple points that at $REPO.
+SIMPLE_REPO="${OPENLOGI_CUSTOM_SIMPLE_REPO:-$HOME/openlogi-simple}"
 SIMPLE_REMOTE="https://github.com/NotTanJune/openlogi-simple.git"
 
 STATE="$HOME/Library/Application Support/OpenLogi-custom"
@@ -259,8 +259,8 @@ build_simple() {
     log "cloning openlogi-simple into $SIMPLE_REPO"
     git clone --quiet "$SIMPLE_REMOTE" "$SIMPLE_REPO" >>"$LOG" 2>&1 || die "could not clone $SIMPLE_REMOTE"
   fi
-  [[ "$(basename "$REPO")" == OpenLogi ]] ||
-    die "openlogi-simple builds against ../OpenLogi, but the fork is at $REPO"
+  # Build against the checkout the agent came from, so the IPC types match.
+  ln -sfn "$REPO" "$SIMPLE_REPO/openlogi"
   local SIMPLE_MANIFEST="$SIMPLE_REPO/Cargo.toml"
   log "testing and building openlogi-simple"
   cargo test --quiet --manifest-path "$SIMPLE_MANIFEST" >>"$LOG" 2>&1 || die "openlogi-simple tests failed"
