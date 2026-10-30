@@ -174,8 +174,6 @@ port_to() {
   local previous
   previous=$(git rev-parse --abbrev-ref HEAD)
   git tag -f "custom-backup/$BRANCH-on-$base" "$BRANCH" >/dev/null
-  PORTED_FROM=$(git rev-parse "$BRANCH")
-  PORTED_TAG="custom-backup/$BRANCH-on-$base"
   log "rebasing $BRANCH from $base onto $tag (backup tag custom-backup/$BRANCH-on-$base)"
   if ! git rebase --quiet --onto "$tag" "$base" "$BRANCH" >>"$LOG" 2>&1; then
     git rebase --abort >/dev/null 2>&1 || true
@@ -333,9 +331,7 @@ EOF
   rm -rf "$STAGE"
   is_custom "$APP" || die "installed app does not match the staged custom build"
   log "installed custom OpenLogi $version (agent $agent_sha)"
-  if [[ -n "${PORTED_FROM:-}" ]]; then
-    publish_fork "$REPO" "$BRANCH" "$PORTED_FROM" "$PORTED_TAG"
-  fi
+  publish_fork "$REPO" "$BRANCH"
   notify "Custom gestures applied to OpenLogi $version"
 }
 
@@ -379,16 +375,38 @@ cmd_update() {
   cmd_apply "$cached"
 }
 
-# Publish a rewritten fork branch: push the backup tag of the old tip first,
-# then the branch with a lease on that old tip. Failure only logs: the local
-# build is already correct, and the next run pushes again.
+# Publish fork branch $2 of $1. GitHub may only lose nothing: its tip must be
+# contained in the local branch, or in one of the backup tags of a rewritten
+# tip (pushed first). The lease is GitHub's own current tip. Any failure only
+# logs; every update check retries an unpublished branch.
 publish_fork() {
-  local repo=$1 branch=$2 old=$3 tag=$4
-  if git -C "$repo" push --quiet origin "refs/tags/$tag" >>"$LOG" 2>&1 &&
-    git -C "$repo" push --quiet "--force-with-lease=$branch:$old" origin "$branch" >>"$LOG" 2>&1; then
-    log "pushed $branch of $repo (old tip kept as $tag)"
+  local repo=$1 branch=$2 remote tag covered=""
+  git -C "$repo" fetch --quiet origin "$branch" >>"$LOG" 2>&1 || {
+    log "WARNING: could not reach GitHub for $branch of $repo; will retry"
+    return 0
+  }
+  remote=$(git -C "$repo" rev-parse "origin/$branch")
+  [[ "$remote" == "$(git -C "$repo" rev-parse "$branch")" ]] && return 0
+  if git -C "$repo" merge-base --is-ancestor "$remote" "$branch"; then
+    covered=fast-forward
   else
-    log "WARNING: could not push $branch of $repo; it stays local until the next run"
+    for tag in $(git -C "$repo" tag -l 'auto-backup/*' 'custom-backup/*' 'backup/*'); do
+      if git -C "$repo" merge-base --is-ancestor "$remote" "$tag"; then
+        git -C "$repo" push --quiet origin "refs/tags/$tag" >>"$LOG" 2>&1 || return 0
+        covered=$tag
+        break
+      fi
+    done
+  fi
+  if [[ -z "$covered" ]]; then
+    log "WARNING: GitHub's $branch of $repo has commits this Mac lacks; not overwriting"
+    notify "$(basename "$repo"): GitHub has changes this Mac lacks; push skipped"
+    return 0
+  fi
+  if git -C "$repo" push --quiet "--force-with-lease=$branch:$remote" origin "$branch" >>"$LOG" 2>&1; then
+    log "pushed $branch of $repo (previous GitHub tip kept by: $covered)"
+  else
+    log "WARNING: could not push $branch of $repo; will retry"
   fi
 }
 
@@ -427,7 +445,7 @@ sync_fork() {
     notify "$name update failed its tests; your current build is unchanged"
     return 1
   fi
-  publish_fork "$repo" "$branch" "$old" "$tag"
+  publish_fork "$repo" "$branch"
   return 0
 }
 
@@ -486,6 +504,10 @@ cmd_check_updates() {
     log "update check: everything is current"
   fi
   restore_settings
+  # Retry anything a previous run could not publish.
+  publish_fork "$REPO" "$BRANCH"
+  publish_fork "$STRAFE_REPO" "$STRAFE_BRANCH"
+  publish_fork "$AUTORAISE_REPO" master
   date +%s >"$STATE/last-update-check"
 }
 
