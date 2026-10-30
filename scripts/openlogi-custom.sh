@@ -34,6 +34,11 @@ APP=/Applications/OpenLogi.app
 AGENT_REL="Contents/Library/LoginItems/OpenLogi Agent.app"
 AGENT_BIN_REL="$AGENT_REL/Contents/MacOS/openlogi-agent"
 MARKER=/tmp/strafe.sock
+# Bundled helpers, built from their own repositories (AutoRaise is GPL-3.0 and
+# stays a separate executable).
+STRAFE_REPO="${OPENLOGI_CUSTOM_STRAFE_REPO:-$HOME/strafe}"
+STRAFE_BRANCH="${OPENLOGI_CUSTOM_STRAFE_BRANCH:-fix/macos27-direction-openlogi}"
+AUTORAISE_REPO="${OPENLOGI_CUSTOM_AUTORAISE_REPO:-$HOME/AutoRaise}"
 
 STATE="$HOME/Library/Application Support/OpenLogi-custom"
 # Bundles live under a .noindex folder so Spotlight, and through it
@@ -210,7 +215,16 @@ install_bundle() {
   # until the GUI re-registers. A missing version marker makes it do so.
   pkill -x openlogi-agent >/dev/null 2>&1 || true
   rm -f "$HOME/.local/share/openlogi/registration-version"
-  open "$APP"
+  # A bundle copied a moment ago may not be registered with LaunchServices
+  # yet, and `open` then fails with -10814. Register it, then retry.
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -f "$APP" >/dev/null 2>&1 || true
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    open "$APP" 2>>"$LOG" && break
+    [[ $attempt -lt 5 ]] || die "could not launch $APP"
+    sleep 2
+  done
   local _
   for _ in $(seq 30); do
     launchctl print "gui/$(id -u)/org.openlogi.agent.service" 2>/dev/null |
@@ -229,6 +243,31 @@ wait_gone() {
   return 1
 }
 
+build_helpers() {
+  local branch
+  branch=$(git -C "$STRAFE_REPO" rev-parse --abbrev-ref HEAD)
+  [[ "$branch" == "$STRAFE_BRANCH" ]] || die "$STRAFE_REPO is on $branch, expected $STRAFE_BRANCH"
+  log "building strafe (release)"
+  (cd "$STRAFE_REPO" && swift build --quiet -c release --product strafe) >>"$LOG" 2>&1 ||
+    die "strafe build failed"
+  log "building AutoRaise"
+  make -C "$AUTORAISE_REPO" clean AutoRaise >>"$LOG" 2>&1 || die "AutoRaise build failed"
+}
+
+# Place and sign the helpers inside the staged agent bundle, before the agent
+# bundle itself is signed so its seal covers them.
+stage_helpers() {
+  local helpers="$STAGE/$AGENT_REL/Contents/Helpers" name
+  mkdir -p "$helpers"
+  install -m 0755 "$STRAFE_REPO/.build/release/strafe" "$helpers/strafe"
+  install -m 0755 "$AUTORAISE_REPO/AutoRaise" "$helpers/autoraise"
+  install -m 0644 "$AUTORAISE_REPO/LICENSE.md" "$STAGE/$AGENT_REL/Contents/Resources/AutoRaise-LICENSE.md"
+  for name in strafe autoraise; do
+    codesign --force --options runtime --identifier "org.openlogi.helper.$name" \
+      --sign "$SIGN_ID" "$helpers/$name" >>"$LOG" 2>&1 || die "signing helper $name failed"
+  done
+}
+
 cmd_apply() {
   lock
   ensure_settings
@@ -244,6 +283,7 @@ cmd_apply() {
 
   port_to "$version"
   build_agent
+  build_helpers
 
   local built="$REPO/target/release/openlogi-agent"
   grep -q "$MARKER" "$built" || die "built agent lacks the Strafe delegation"
@@ -256,6 +296,7 @@ cmd_apply() {
   # The upstream profile grants the virtual-HID-keyboard entitlement to the
   # upstream team only. Without it keys post as CGEvents, as before 0.8.
   rm -f "$STAGE/$AGENT_REL/Contents/embedded.provisionprofile"
+  stage_helpers
   codesign --force --options runtime --sign "$SIGN_ID" "$STAGE/$AGENT_REL" >>"$LOG" 2>&1
   codesign --force --options runtime --preserve-metadata=identifier,entitlements \
     --sign "$SIGN_ID" "$STAGE" >>"$LOG" 2>&1
