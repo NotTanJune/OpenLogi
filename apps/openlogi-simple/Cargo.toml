@@ -9,7 +9,7 @@ publish = false
 [workspace]
 
 [dependencies]
-openlogi-core = { path = "../../crates/openlogi-core" }
+openlogi-core = { path = "../../crates/openlogi-core", features = ["logging"] }
 openlogi-ipc = { path = "../../crates/openlogi-ipc" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 tarpc = { version = "0.38", features = ["tokio1"] }
@@ -23,6 +23,12 @@ disclaim = "0.1"
 # upstream GUI's registration module enables.
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSError"] }
+# The window: every AppKit class it draws or subclasses. The crate's default
+# features are the whole framework, which is what the upstream workspace builds
+# too (`objc2-app-kit = "0.3.2"` in the root manifest).
+objc2-app-kit = "0.3.2"
+# Hops from a worker thread to the main queue, as the agent's tray does.
+dispatch2 = "0.3.1"
 objc2-service-management = { version = "0.3.2", default-features = false, features = [
     "std",
     "SMAppService",

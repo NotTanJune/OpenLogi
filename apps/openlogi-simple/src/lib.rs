@@ -10,6 +10,8 @@
 //! - [`launch`]: starting the agent when it is down.
 //! - [`registration`]: `SMAppService` registration of the agent's launchd job.
 //! - [`desktop`]: Strafe and AutoRaise settings and restarting those helpers.
+//! - [`controller`]: the write order for an edit, and the banner and desktop edits.
+//! - [`layout`]: the window's content as data.
 
 #[cfg(not(target_os = "macos"))]
 compile_error!(
@@ -17,9 +19,11 @@ compile_error!(
 );
 
 pub mod agent;
+pub mod controller;
 pub mod desktop;
 pub mod devices;
 pub mod launch;
+pub mod layout;
 pub mod model;
 pub mod registration;
 pub mod store;
