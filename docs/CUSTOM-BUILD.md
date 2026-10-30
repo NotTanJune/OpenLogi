@@ -38,6 +38,27 @@ Strafe or AutoRaise app, Login Item, or privacy row.
   instead of stopping after five crashes, and the menu does not show an
   "unavailable" state.
 
+## Update protection
+
+The guard runs `check-updates` once a day (at login, then every 24 hours):
+
+| Upstream | What happens |
+|---|---|
+| OpenLogi (`AprilNEA/OpenLogi`) | A newer stable tag is downloaded from `updates.openlogi.org`, accepted only with upstream's intact signature, and the patch branch is rebased onto it |
+| Strafe (`rileycx/strafe`) | `fix/macos27-direction-openlogi` is rebased onto `upstream/main`, then `swift build` and `swift test` must pass |
+| AutoRaise (`sbmpost/AutoRaise`) | `master` is fast-forwarded to `upstream/master`, then `make` must pass |
+
+Any change triggers a full rebuild and install. A conflict, failed build, or
+failed test keeps the working build and posts a notification; nothing is
+installed. Each rewritten branch is pushed to the `NotTanJune` fork with a lease
+on GitHub's actual tip, and only after a backup tag holding that tip is pushed,
+so nothing on GitHub is ever lost. A push that fails is retried on the next
+check. Strafe's speed and hotkey settings are snapshotted around each rebuild,
+restored if an upstream migration changed them, and checked against the
+bundled helper (a renamed settings key raises a notification).
+
+Run it by hand with `scripts/openlogi-custom.sh check-updates`.
+
 ## Settings the guard enforces
 
 `mouse_profile_target = "focused"` in `~/.config/openlogi/config.toml`. Since
@@ -56,7 +77,8 @@ re-asserts the setting on every run.
 |---|---|
 | `status` | installed version, custom or stock, recorded build, guard state |
 | `apply [APP]` | rebase the patch branch onto the app's tag if needed, run the focused tests, build the agent and both helpers, re-sign, install, relaunch, and refresh the guard's script copy |
-| `update` | download the latest upstream DMG with `gh`, then `apply` it |
+| `update` | download the latest stable upstream release, then `apply` it |
+| `check-updates` | sync all three upstreams and rebuild when anything changed (see below) |
 | `restore` | reinstall the last verified custom bundle |
 | `install-guard` / `uninstall-guard` | manage the launchd guard |
 
