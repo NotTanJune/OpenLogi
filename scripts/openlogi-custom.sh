@@ -13,6 +13,9 @@
 #                                      stock copy)
 #   openlogi-custom.sh update          download the latest upstream release,
 #                                      then apply it
+#   openlogi-custom.sh check-updates   sync Strafe and AutoRaise with their
+#                                      upstreams, take a newer OpenLogi
+#                                      release, rebuild; the guard runs it daily
 #   openlogi-custom.sh restore         reinstall the last verified custom app
 #   openlogi-custom.sh guard           launchd entry point: re-apply when an
 #                                      update replaced the custom app
@@ -67,6 +70,8 @@ sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 version_of() { defaults read "$1/Contents/Info.plist" CFBundleShortVersionString; }
 
 lock() {
+  # Reentrant: check-updates holds the lock while it calls apply.
+  [[ -n "${LOCK_HELD:-}" ]] && return 0
   if ! mkdir "$LOCK" 2>/dev/null; then
     # A lock older than an hour is left over from a killed run.
     if [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]]; then
@@ -77,6 +82,7 @@ lock() {
     fi
   fi
   trap 'rm -rf "$LOCK"' EXIT
+  LOCK_HELD=1
 }
 
 # A stock bundle is an intact upstream release signed by the upstream team.
@@ -168,6 +174,8 @@ port_to() {
   local previous
   previous=$(git rev-parse --abbrev-ref HEAD)
   git tag -f "custom-backup/$BRANCH-on-$base" "$BRANCH" >/dev/null
+  PORTED_FROM=$(git rev-parse "$BRANCH")
+  PORTED_TAG="custom-backup/$BRANCH-on-$base"
   log "rebasing $BRANCH from $base onto $tag (backup tag custom-backup/$BRANCH-on-$base)"
   if ! git rebase --quiet --onto "$tag" "$base" "$BRANCH" >>"$LOG" 2>&1; then
     git rebase --abort >/dev/null 2>&1 || true
@@ -325,23 +333,160 @@ EOF
   rm -rf "$STAGE"
   is_custom "$APP" || die "installed app does not match the staged custom build"
   log "installed custom OpenLogi $version (agent $agent_sha)"
+  if [[ -n "${PORTED_FROM:-}" ]]; then
+    publish_fork "$REPO" "$BRANCH" "$PORTED_FROM" "$PORTED_TAG"
+  fi
   notify "Custom gestures applied to OpenLogi $version"
 }
 
-cmd_update() {
-  local tag dir dmg mount
-  tag=$(gh release view -R "$UPSTREAM_REPO" --json tagName -q .tagName)
+# The newest stable upstream OpenLogi tag, e.g. v0.8.19.
+latest_openlogi_tag() {
+  git ls-remote --tags --refs "https://github.com/$UPSTREAM_REPO.git" 'v*' |
+    sed 's|.*refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+}
+
+# Download release $1 and cache its verified stock bundle; prints its path.
+# Only a bundle carrying upstream's intact signature is accepted.
+download_release() {
+  local tag=$1 dir dmg mount cached
   dir=$(mktemp -d "$STATE/download.XXXXXX")
-  gh release download "$tag" -R "$UPSTREAM_REPO" -D "$dir" \
-    -p "OpenLogi-$tag-macos-$(uname -m).dmg"
-  dmg=$(find "$dir" -name '*.dmg' | head -1)
+  dmg="$dir/OpenLogi-$tag.dmg"
+  if ! curl -fsSL -o "$dmg" \
+    "https://updates.openlogi.org/releases/$tag/OpenLogi-$tag-macos-$(uname -m).dmg"; then
+    rm -rf "$dir"
+    log "release $tag has no downloadable macOS build yet"
+    return 1
+  fi
   mount=$(mktemp -d "$STATE/mount.XXXXXX")
   hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg" >/dev/null
-  local cached
-  cached=$(cache_stock "$mount/OpenLogi.app")
+  if is_stock "$mount/OpenLogi.app"; then
+    cached=$(cache_stock "$mount/OpenLogi.app")
+  fi
   hdiutil detach "$mount" >/dev/null
   rm -rf "$dir" "$mount"
+  [[ -n "${cached:-}" ]] || {
+    log "release $tag failed upstream signature verification; ignored"
+    return 1
+  }
+  printf '%s\n' "$cached"
+}
+
+cmd_update() {
+  local tag cached
+  tag=$(latest_openlogi_tag)
+  [[ -n "$tag" ]] || die "could not read upstream OpenLogi tags"
+  cached=$(download_release "$tag") || die "could not download OpenLogi $tag"
   cmd_apply "$cached"
+}
+
+# Publish a rewritten fork branch: push the backup tag of the old tip first,
+# then the branch with a lease on that old tip. Failure only logs: the local
+# build is already correct, and the next run pushes again.
+publish_fork() {
+  local repo=$1 branch=$2 old=$3 tag=$4
+  if git -C "$repo" push --quiet origin "refs/tags/$tag" >>"$LOG" 2>&1 &&
+    git -C "$repo" push --quiet "--force-with-lease=$branch:$old" origin "$branch" >>"$LOG" 2>&1; then
+    log "pushed $branch of $repo (old tip kept as $tag)"
+  else
+    log "WARNING: could not push $branch of $repo; it stays local until the next run"
+  fi
+}
+
+# Rebase fork branch $2 of $1 onto upstream $3, keep it only if $4 (a build
+# and test command) passes, then publish it. Returns 0 when the branch moved.
+sync_fork() {
+  local repo=$1 branch=$2 upstream=$3 verify=$4 name old base tag
+  name=$(basename "$repo")
+  if [[ "$(git -C "$repo" rev-parse --abbrev-ref HEAD)" != "$branch" ]] ||
+    [[ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]]; then
+    log "$name: not on a clean $branch; update check skipped"
+    notify "$name update check skipped: commit or switch to $branch"
+    return 1
+  fi
+  if [[ -z "${OPENLOGI_CUSTOM_OFFLINE:-}" ]]; then
+    git -C "$repo" fetch --quiet "${upstream%%/*}" || {
+      log "$name: fetch failed; will retry"
+      return 1
+    }
+  fi
+  git -C "$repo" merge-base --is-ancestor "$upstream" "$branch" && return 1
+  old=$(git -C "$repo" rev-parse "$branch")
+  base=$(git -C "$repo" merge-base "$upstream" "$branch")
+  tag="auto-backup/$branch-$(date +%Y%m%d-%H%M%S)"
+  git -C "$repo" tag "$tag" "$old"
+  log "$name: upstream moved; rebasing $branch onto $upstream (old tip kept as $tag)"
+  if ! git -C "$repo" rebase --quiet --onto "$upstream" "$base" "$branch" >>"$LOG" 2>&1; then
+    git -C "$repo" rebase --abort >/dev/null 2>&1 || true
+    log "$name: rebase onto $upstream conflicted; keeping the working build"
+    notify "$name update needs a manual merge; your current build is unchanged"
+    return 1
+  fi
+  if ! (cd "$repo" && eval "$verify") >>"$LOG" 2>&1; then
+    git -C "$repo" reset --quiet --hard "$old"
+    log "$name: updated code failed its build or tests; rolled back"
+    notify "$name update failed its tests; your current build is unchanged"
+    return 1
+  fi
+  publish_fork "$repo" "$branch" "$old" "$tag"
+  return 0
+}
+
+# Settings the helpers' upstreams could reset in a migration; restored after
+# every rebuild.
+snapshot_settings() {
+  SNAP_SPEED=$(defaults read com.rileycx.strafe transitionSpeed 2>/dev/null || true)
+  SNAP_HOTKEYS=$(defaults read com.rileycx.strafe spaceHotkeysEnabled 2>/dev/null || true)
+}
+
+restore_settings() {
+  local now
+  now=$(defaults read com.rileycx.strafe transitionSpeed 2>/dev/null || true)
+  if [[ -n "$SNAP_SPEED" && "$now" != "$SNAP_SPEED" ]]; then
+    defaults write com.rileycx.strafe transitionSpeed -int "$SNAP_SPEED"
+    log "restored Strafe transition speed $SNAP_SPEED"
+  fi
+  now=$(defaults read com.rileycx.strafe spaceHotkeysEnabled 2>/dev/null || true)
+  if [[ -n "$SNAP_HOTKEYS" && "$now" != "$SNAP_HOTKEYS" ]]; then
+    defaults write com.rileycx.strafe spaceHotkeysEnabled -bool "$([[ "$SNAP_HOTKEYS" == 1 ]] && echo true || echo false)"
+    log "restored Strafe hotkeys setting"
+  fi
+  # The installed helper must read the speed the menu wrote; a renamed key
+  # upstream would silently detach the menu from Strafe.
+  local helper="$APP/$AGENT_REL/Contents/Helpers/strafe" want
+  if [[ -x "$helper" && -n "$SNAP_SPEED" ]]; then
+    local -a titles=(Instant Quick Smooth)
+    want=${titles[$SNAP_SPEED]:-Instant}
+    "$helper" speed 2>/dev/null | head -1 | grep -q "$want" || {
+      log "WARNING: bundled Strafe does not read the stored speed ($want); its settings keys may have changed"
+      notify "Strafe settings may have changed upstream; check the Space Switching menu"
+    }
+  fi
+}
+
+cmd_check_updates() {
+  lock
+  local rebuild="" source="" tag installed
+  snapshot_settings
+  sync_fork "$STRAFE_REPO" "$STRAFE_BRANCH" upstream/main \
+    'swift build --quiet -c release --product strafe && swift test --quiet' && rebuild=1
+  sync_fork "$AUTORAISE_REPO" master upstream/master 'make clean AutoRaise' && rebuild=1
+  tag=$(latest_openlogi_tag || true)
+  installed=$(version_of "$APP" 2>/dev/null || echo 0)
+  if [[ -n "$tag" && "v$installed" != "$tag" ]] &&
+    [[ "$(printf '%s\n%s\n' "v$installed" "$tag" | sort -V | tail -1)" == "$tag" ]]; then
+    log "OpenLogi $tag is available (installed $installed)"
+    source=$(download_release "$tag") || source=""
+  fi
+  if [[ -n "$source" ]]; then
+    notify "Updating OpenLogi to $tag with your custom features"
+    cmd_apply "$source"
+  elif [[ -n "$rebuild" ]]; then
+    cmd_apply
+  else
+    log "update check: everything is current"
+  fi
+  restore_settings
+  date +%s >"$STATE/last-update-check"
 }
 
 cmd_restore() {
@@ -353,7 +498,15 @@ cmd_restore() {
 cmd_guard() {
   ensure_settings
   [[ -d "$APP" ]] || exit 0
-  if [[ -d "$LOCK" ]] || is_custom "$APP"; then exit 0; fi
+  [[ -d "$LOCK" ]] && exit 0
+  if is_custom "$APP"; then
+    local last
+    last=$(cat "$STATE/last-update-check" 2>/dev/null || echo 0)
+    if (($(date +%s) - last >= 86400)); then
+      (cmd_check_updates) || log "update check failed; the working build is unchanged"
+    fi
+    exit 0
+  fi
   if is_stock "$APP"; then
     log "guard: stock OpenLogi $(version_of "$APP") replaced the custom build; re-applying"
     notify "OpenLogi was updated; re-applying custom gestures"
@@ -426,22 +579,26 @@ cmd_uninstall_guard() {
   log "guard removed"
 }
 
-case "${1:-status}" in
-  status) cmd_status ;;
-  apply)
-    shift
-    cmd_apply "${1:-}"
-    ;;
-  update) cmd_update ;;
-  restore)
-    lock
-    cmd_restore
-    ;;
-  guard) cmd_guard ;;
-  install-guard) cmd_install_guard ;;
-  uninstall-guard) cmd_uninstall_guard ;;
-  *)
-    sed -n '2,20p' "$0"
-    exit 2
-    ;;
-esac
+# Dispatch only when executed, so tests can source the functions.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  case "${1:-status}" in
+    status) cmd_status ;;
+    apply)
+      shift
+      cmd_apply "${1:-}"
+      ;;
+    update) cmd_update ;;
+    check-updates) cmd_check_updates ;;
+    restore)
+      lock
+      cmd_restore
+      ;;
+    guard) cmd_guard ;;
+    install-guard) cmd_install_guard ;;
+    uninstall-guard) cmd_uninstall_guard ;;
+    *)
+      sed -n '2,20p' "$0"
+      exit 2
+      ;;
+  esac
+fi
