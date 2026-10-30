@@ -271,6 +271,11 @@ stage_helpers() {
 cmd_apply() {
   lock
   ensure_settings
+  # The guard runs a private copy; keep it in step with the script that last
+  # applied a build, or a later re-apply would use an outdated pipeline.
+  if [[ -f "$GUARD_PLIST" && ! "$0" -ef "$STATE/openlogi-custom.sh" ]]; then
+    install -m 0755 "$0" "$STATE/openlogi-custom.sh"
+  fi
   local source=${1:-} version
   if [[ -z "$source" ]]; then
     if is_stock "$APP"; then source=$APP; else source=$(latest_cached_stock); fi
