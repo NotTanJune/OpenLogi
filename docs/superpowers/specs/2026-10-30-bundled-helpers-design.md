@@ -1,7 +1,7 @@
 # Bundled helpers: Strafe and AutoRaise inside the custom OpenLogi build
 
 Date: 2026-10-30
-Status: approved design, awaiting spec review
+Status: implemented 2026-10-30 (see docs/CUSTOM-BUILD.md for deviations)
 
 ## Goal
 
