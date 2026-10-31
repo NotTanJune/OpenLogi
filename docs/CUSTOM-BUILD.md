@@ -66,7 +66,16 @@ Strafe or AutoRaise app, Login Item, or privacy row.
   that helper.
 - AutoRaise is GPL-3.0 and stays a separate executable built from
   `NotTanJune/AutoRaise`; its license ships as
-  `Contents/Resources/AutoRaise-LICENSE.md`.
+  `Contents/Resources/AutoRaise-LICENSE.md`. Fixes to a helper's own code are
+  committed to its fork, which the build compiles from, never to this repo.
+- Patches the forks carry on top of their upstreams:
+  - Strafe (`fix/macos27-direction-openlogi`): `strafe serve`, the
+    status-item-less mode the agent runs, and the `/tmp/strafe.sock` control
+    socket.
+  - AutoRaise (`master`): hovering a sheet, such as Ghostty's close
+    confirmation, raises the window it is attached to instead of skipping it,
+    and verbose mode names the window behind every "Not a main window"
+    exclusion.
 - Helper output: `~/.local/state/openlogi/helper-{strafe,autoraise}.log`.
 - Differences from the design spec: restarts back off to 60 s indefinitely
   instead of stopping after five crashes, and the menu does not show an
@@ -80,7 +89,7 @@ The guard runs `check-updates` once a day (at login, then every 24 hours):
 |---|---|
 | OpenLogi (`AprilNEA/OpenLogi`) | A newer stable tag is downloaded from `updates.openlogi.org`, accepted only with upstream's intact signature, and the patch branch is rebased onto it |
 | Strafe (`rileycx/strafe`) | `fix/macos27-direction-openlogi` is rebased onto `upstream/main`, then `swift build` and `swift test` must pass |
-| AutoRaise (`sbmpost/AutoRaise`) | `master` is fast-forwarded to `upstream/master`, then `make` must pass |
+| AutoRaise (`sbmpost/AutoRaise`) | `master` is rebased onto `upstream/master`, then `make` must pass |
 
 Any change triggers a full rebuild and install. A conflict, failed build, or
 failed test keeps the working build and posts a notification; nothing is
