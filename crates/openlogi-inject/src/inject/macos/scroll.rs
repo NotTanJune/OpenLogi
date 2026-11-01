@@ -39,7 +39,7 @@ pub(super) fn dispatch_scroll(dx: i8, dy: i8) {
 
 pub(in crate::inject) fn post_scroll(delta: ScrollDelta) {
     if let ScrollDelta::WheelTicks { x, y } = delta {
-        if let Some(event) = wheel_scroll_event(x, y, wheel_ticks(x, y), None) {
+        if let Some(event) = wheel_scroll_event(x, y, wheel_ticks(x, y)) {
             event.post(CGEventTapLocation::HID);
         }
         return;
@@ -70,15 +70,43 @@ pub(in crate::inject) fn post_scroll(delta: ScrollDelta) {
 }
 
 pub(in crate::inject) fn post_smooth_scroll(delta: ScrollDelta, _phase: SmoothScrollPhase) {
+    if let ScrollDelta::WheelTicks { x, y } = delta {
+        if x == 0.0 && y == 0.0 {
+            return;
+        }
+        if let Some(event) = wheel_scroll_event(x, y, wheel_ticks(x, y)) {
+            event.post(CGEventTapLocation::HID);
+        }
+        return;
+    }
     post_continuous_scroll(delta, None);
 }
 
+/// Wheel ticks become pixels here: a phase declares a trackpad gesture, and a
+/// gesture is continuous input. Stamping one on a non-continuous line event
+/// built a hybrid that Chromium scrolled as one animated line jump per
+/// thumb-wheel report.
 pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
-    post_continuous_scroll(delta, Some(phase));
+    post_continuous_scroll(gesture_points(delta), Some(phase));
+}
+
+/// Points one wheel tick scrolls inside a phased gesture: the pixels-per-line
+/// step Chromium and WebKit give one line of a non-continuous wheel event, so
+/// a gesture scrolls there as far as the line events it replaced.
+const POINTS_PER_GESTURE_TICK: f64 = 40.0;
+
+/// A gesture frame's distance in points.
+fn gesture_points(delta: ScrollDelta) -> ScrollDelta {
+    match delta {
+        ScrollDelta::WheelTicks { x, y } => {
+            ScrollDelta::pixels(x * POINTS_PER_GESTURE_TICK, y * POINTS_PER_GESTURE_TICK)
+        }
+        pixels @ ScrollDelta::Pixels { .. } => pixels,
+    }
 }
 
 /// Post one continuous pixel event, phaseless (`None`) or stamped with a
-/// gesture phase.
+/// gesture phase. `delta` is in pixels.
 ///
 /// Phaseless is the default for smoothed wheel output: continuous events with
 /// zeroed gesture/momentum phases scroll everywhere a wheel does, while a
@@ -88,16 +116,6 @@ pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScr
 /// from JS wheel handlers). A phase is stamped only where a gesture is the
 /// point, such as a horizontal swipe AppKit's recognisers must see.
 fn post_continuous_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) {
-    if let ScrollDelta::WheelTicks { x, y } = delta {
-        if phase.is_none() && x == 0.0 && y == 0.0 {
-            return;
-        }
-        if let Some(event) = wheel_scroll_event(x, y, wheel_ticks(x, y), phase) {
-            event.post(CGEventTapLocation::HID);
-        }
-        return;
-    }
-
     let Ok(mut quantizer) = SMOOTH_SCROLL_QUANTIZER.lock() else {
         tracing::warn!("macOS smooth-scroll quantizer mutex poisoned");
         return;
@@ -156,12 +174,7 @@ fn wheel_ticks(x: f64, y: f64) -> QuantizedScroll {
 /// legacy `wheelDelta` VS Code scrolls by from it, so a zero there leaves VS
 /// Code still. It is written before the fixed-point delta so the fractional
 /// distance every other reader uses stays the canonical one.
-fn wheel_scroll_event(
-    x: f64,
-    y: f64,
-    ticks: QuantizedScroll,
-    phase: Option<SmoothScrollPhase>,
-) -> Option<CGEvent> {
+fn wheel_scroll_event(x: f64, y: f64, ticks: QuantizedScroll) -> Option<CGEvent> {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for wheel scroll");
         return None;
@@ -175,7 +188,6 @@ fn wheel_scroll_event(
     ev.set_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1, y);
     ev.set_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2, x);
     ev.set_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 0);
-    set_scroll_phase(&ev, phase);
     tag_synthetic(&ev);
     Some(ev)
 }
@@ -280,39 +292,62 @@ mod tests {
     }
 
     #[test]
-    fn wheel_event_preserves_fractional_distance_when_phased() {
-        let fields = [
-            EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1,
-            EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2,
-        ];
-        let phaseless = wheel_scroll_event(-0.025, 0.05, QuantizedScroll::default(), None)
-            .expect("a wheel event");
-        let before = fields.map(|field| phaseless.get_double_value_field(field));
-        assert!((before[0] - 0.05).abs() < 1.0e-4);
-        assert!((before[1] + 0.025).abs() < 1.0e-4);
-        assert_eq!(phaseless.get_integer_value_field(SCROLL_PHASE), 0);
-
-        let phased = wheel_scroll_event(
-            -0.025,
-            0.05,
-            QuantizedScroll::default(),
-            Some(SmoothScrollPhase::Changed),
-        )
-        .expect("a wheel event");
-        let after = fields.map(|field| phased.get_double_value_field(field));
-        assert!((after[0] - before[0]).abs() < f64::EPSILON);
-        assert!((after[1] - before[1]).abs() < f64::EPSILON);
+    fn wheel_event_preserves_fractional_distance_without_a_phase() {
+        let event =
+            wheel_scroll_event(-0.025, 0.05, QuantizedScroll::default()).expect("a wheel event");
+        let y =
+            event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_1);
+        let x =
+            event.get_double_value_field(EventField::SCROLL_WHEEL_EVENT_FIXED_POINT_DELTA_AXIS_2);
+        assert!((y - 0.05).abs() < 1.0e-4, "{y}");
+        assert!((x + 0.025).abs() < 1.0e-4, "{x}");
+        assert_eq!(event.get_integer_value_field(SCROLL_PHASE), 0);
         assert_eq!(
-            phased.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS),
-            0
-        );
-        assert_eq!(
-            phased.get_integer_value_field(SCROLL_PHASE),
-            scroll_phase_value(SmoothScrollPhase::Changed)
-        );
-        assert_eq!(
-            phased.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
+            event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
             crate::SYNTHETIC_EVENT_USER_DATA
+        );
+    }
+
+    /// A gesture is continuous input: its wheel ticks become points, in both
+    /// directions, while pixel distance passes through untouched.
+    #[test]
+    fn gesture_wheel_ticks_become_points() {
+        assert_eq!(
+            gesture_points(ScrollDelta::wheel_ticks(0.5, -0.25)),
+            ScrollDelta::pixels(20.0, -10.0)
+        );
+        assert_eq!(
+            gesture_points(ScrollDelta::wheel_ticks(-0.5, 0.0)),
+            ScrollDelta::pixels(-20.0, 0.0)
+        );
+        assert_eq!(
+            gesture_points(ScrollDelta::pixels(3.0, -4.0)),
+            ScrollDelta::pixels(3.0, -4.0)
+        );
+    }
+
+    /// The event a gesture frame of wheel ticks becomes: continuous, carrying
+    /// its points and its phase.
+    #[test]
+    fn gesture_frames_are_continuous_point_events() {
+        let ScrollDelta::Pixels { x, .. } = gesture_points(ScrollDelta::wheel_ticks(-0.75, 0.0))
+        else {
+            panic!("gesture distance is in points");
+        };
+        assert!((x + 30.0).abs() < f64::EPSILON, "{x}");
+        let event = continuous_scroll_event(horizontal(-30), Some(SmoothScrollPhase::Changed))
+            .expect("a scroll event");
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS),
+            1
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2),
+            -30
+        );
+        assert_eq!(
+            event.get_integer_value_field(SCROLL_PHASE),
+            scroll_phase_value(SmoothScrollPhase::Changed)
         );
     }
 
@@ -324,7 +359,7 @@ mod tests {
         // the test fails if writing the fixed-point fields replaces the
         // carried ticks with ones derived from the distance.
         let ticks = QuantizedScroll { x: -2, y: 3 };
-        let event = wheel_scroll_event(-0.75, 1.6, ticks, None).expect("a wheel event");
+        let event = wheel_scroll_event(-0.75, 1.6, ticks).expect("a wheel event");
         assert_eq!(
             event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_DELTA_AXIS_1),
             3
