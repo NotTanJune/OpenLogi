@@ -1,4 +1,4 @@
-//! Synthetic scroll on macOS: the one-tick scroll actions, the fractional wheel, and the continuous smooth-scroll phases.
+//! Synthetic scroll on macOS: the one-tick scroll actions, the fractional wheel, and phaseless continuous scroll.
 
 use crate::inject::{QuantizedScroll, ScrollQuantizer, SmoothScrollPhase};
 use core_graphics::event::{CGEvent, CGEventTapLocation, EventField, ScrollEventUnit};
@@ -12,12 +12,10 @@ static PIXEL_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 static SMOOTH_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
+static PRECISE_SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
+    LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
 static WHEEL_TICK_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
-
-// `core-graphics` 0.25 does not expose these `CGEventTypes.h` fields.
-const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
-const MOMENTUM_PHASE: u32 = 123; // kCGScrollWheelEventMomentumPhase
 
 /// Post a synthetic scroll event for one tick in direction `(dx, dy)`. Unit
 /// direction (-1/0/1) scaled by the fixed "one tick" pixel magnitude the
@@ -79,66 +77,63 @@ pub(in crate::inject) fn post_smooth_scroll(delta: ScrollDelta, _phase: SmoothSc
         }
         return;
     }
-    post_continuous_scroll(delta, None);
+    post_continuous_scroll(&SMOOTH_SCROLL_QUANTIZER, delta);
 }
 
-/// Wheel ticks become pixels here: a phase declares a trackpad gesture, and a
-/// gesture is continuous input. Stamping one on a non-continuous line event
-/// built a hybrid that Chromium scrolled as one animated line jump per
-/// thumb-wheel report.
-pub(in crate::inject) fn post_phased_scroll(delta: ScrollDelta, phase: SmoothScrollPhase) {
-    post_continuous_scroll(gesture_points(delta), Some(phase));
+/// A diverted high-resolution wheel's distance as one phaseless continuous
+/// point event, the precise scrolling a line event cannot carry: Chromium
+/// scrolls each non-continuous event as its own animated line jump, which
+/// made a thumb wheel stutter.
+///
+/// It never carries a scroll phase. A phase declares a trackpad gesture, and
+/// browsers turn a horizontal gesture's overscroll into Back/Forward
+/// navigation.
+pub(in crate::inject) fn post_precise_scroll(delta: ScrollDelta) {
+    post_continuous_scroll(&PRECISE_SCROLL_QUANTIZER, precise_points(delta));
 }
 
-/// Points one wheel tick scrolls inside a phased gesture: the pixels-per-line
-/// step Chromium and WebKit give one line of a non-continuous wheel event, so
-/// a gesture scrolls there as far as the line events it replaced.
-const POINTS_PER_GESTURE_TICK: f64 = 40.0;
+/// Points one wheel tick scrolls as precise output: the pixels-per-line step
+/// Chromium and WebKit give one line of a non-continuous wheel event, so the
+/// wheel scrolls there as far as the line events it replaced.
+const POINTS_PER_PRECISE_TICK: f64 = 40.0;
 
-/// A gesture frame's distance in points.
-fn gesture_points(delta: ScrollDelta) -> ScrollDelta {
+/// A precise distance in points.
+fn precise_points(delta: ScrollDelta) -> ScrollDelta {
     match delta {
         ScrollDelta::WheelTicks { x, y } => {
-            ScrollDelta::pixels(x * POINTS_PER_GESTURE_TICK, y * POINTS_PER_GESTURE_TICK)
+            ScrollDelta::pixels(x * POINTS_PER_PRECISE_TICK, y * POINTS_PER_PRECISE_TICK)
         }
         pixels @ ScrollDelta::Pixels { .. } => pixels,
     }
 }
 
-/// Post one continuous pixel event, phaseless (`None`) or stamped with a
-/// gesture phase. `delta` is in pixels.
+/// Post one phaseless continuous pixel event. `delta` is in pixels.
 ///
-/// Phaseless is the default for smoothed wheel output: continuous events with
-/// zeroed gesture/momentum phases scroll everywhere a wheel does, while a
-/// Began/Changed/Ended stream declares a trackpad gesture — which switches
-/// AppKit/WebKit into gesture handling (rubber-band overscroll appears on
-/// wheel scrolls, and WebKit's gesture latching can starve sites that scroll
-/// from JS wheel handlers). A phase is stamped only where a gesture is the
-/// point, such as a horizontal swipe AppKit's recognisers must see.
-fn post_continuous_scroll(delta: ScrollDelta, phase: Option<SmoothScrollPhase>) {
-    let Ok(mut quantizer) = SMOOTH_SCROLL_QUANTIZER.lock() else {
-        tracing::warn!("macOS smooth-scroll quantizer mutex poisoned");
+/// Continuous events with zeroed gesture/momentum phases scroll everywhere a
+/// wheel does, while a Began/Changed/Ended stream declares a trackpad gesture —
+/// which switches AppKit/WebKit into gesture handling (rubber-band overscroll,
+/// swipe navigation, and WebKit gesture latching that can starve sites that
+/// scroll from JS wheel handlers).
+fn post_continuous_scroll(quantizer: &Mutex<ScrollQuantizer>, delta: ScrollDelta) {
+    let Ok(mut quantizer) = quantizer.lock() else {
+        tracing::warn!("macOS continuous-scroll quantizer mutex poisoned");
         return;
     };
     let delta = quantizer.quantize(delta, 1.0);
     drop(quantizer);
 
-    // Sub-pixel frames quantize to zero; posting a phaseless one would only
-    // flood the event stream. A phased zero-distance frame still carries its
-    // phase, and a gesture's Ended or Cancelled must always arrive.
-    if phase.is_none() && delta == QuantizedScroll::default() {
+    // Sub-pixel frames quantize to zero; posting one would only flood the
+    // event stream.
+    if delta == QuantizedScroll::default() {
         return;
     }
-    if let Some(event) = continuous_scroll_event(delta, phase) {
+    if let Some(event) = continuous_scroll_event(delta) {
         event.post(CGEventTapLocation::HID);
     }
 }
 
-/// Build (without posting) one tagged continuous pixel event.
-fn continuous_scroll_event(
-    delta: QuantizedScroll,
-    phase: Option<SmoothScrollPhase>,
-) -> Option<CGEvent> {
+/// Build (without posting) one tagged, phaseless continuous pixel event.
+fn continuous_scroll_event(delta: QuantizedScroll) -> Option<CGEvent> {
     let Ok(src) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
         tracing::warn!("CGEventSource::new failed for smooth scroll");
         return None;
@@ -149,7 +144,6 @@ fn continuous_scroll_event(
         return None;
     };
     set_continuous_scroll_fields(&ev, delta);
-    set_scroll_phase(&ev, phase);
     tag_synthetic(&ev);
     Some(ev)
 }
@@ -190,22 +184,6 @@ fn wheel_scroll_event(x: f64, y: f64, ticks: QuantizedScroll) -> Option<CGEvent>
     ev.set_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS, 0);
     tag_synthetic(&ev);
     Some(ev)
-}
-
-fn set_scroll_phase(event: &CGEvent, phase: Option<SmoothScrollPhase>) {
-    if let Some(phase) = phase {
-        event.set_integer_value_field(SCROLL_PHASE, scroll_phase_value(phase));
-        event.set_integer_value_field(MOMENTUM_PHASE, 0);
-    }
-}
-
-const fn scroll_phase_value(phase: SmoothScrollPhase) -> i64 {
-    match phase {
-        SmoothScrollPhase::Began => 1,
-        SmoothScrollPhase::Changed => 2,
-        SmoothScrollPhase::Ended => 4,
-        SmoothScrollPhase::Cancelled => 8,
-    }
 }
 
 fn set_continuous_scroll_fields(event: &CGEvent, delta: QuantizedScroll) {
@@ -251,44 +229,33 @@ fn set_continuous_axis(
 mod tests {
     use super::*;
 
+    // `core-graphics` 0.25 does not expose these `CGEventTypes.h` fields.
+    const SCROLL_PHASE: u32 = 99; // kCGScrollWheelEventScrollPhase
+    const MOMENTUM_PHASE: u32 = 123; // kCGScrollWheelEventMomentumPhase
+
     fn horizontal(x: i32) -> QuantizedScroll {
         QuantizedScroll { x, y: 0 }
     }
 
-    /// Smoothed wheel output must stay phaseless: a phase declares a trackpad
-    /// gesture to AppKit/WebKit.
+    /// Continuous output must stay phaseless: a phase declares a trackpad
+    /// gesture to AppKit/WebKit, whose horizontal overscroll navigates.
     #[test]
-    fn smoothed_wheel_events_carry_no_phase() {
-        let event = continuous_scroll_event(horizontal(10), None).expect("a scroll event");
+    fn continuous_events_carry_no_phase() {
+        let event = continuous_scroll_event(horizontal(-30)).expect("a scroll event");
         assert_eq!(event.get_integer_value_field(SCROLL_PHASE), 0);
+        assert_eq!(event.get_integer_value_field(MOMENTUM_PHASE), 0);
         assert_eq!(
             event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS),
             1
         );
-    }
-
-    /// A phased gesture's phases reach the event, terminal zero-distance
-    /// frames included, or swipe recognisers never see a gesture.
-    #[test]
-    fn phased_gesture_events_carry_every_phase() {
-        for (phase, delta, expected) in [
-            (SmoothScrollPhase::Began, horizontal(10), 1),
-            (SmoothScrollPhase::Changed, horizontal(-10), 2),
-            (SmoothScrollPhase::Ended, horizontal(0), 4),
-            (SmoothScrollPhase::Cancelled, horizontal(0), 8),
-        ] {
-            let event = continuous_scroll_event(delta, Some(phase)).expect("a scroll event");
-            assert_eq!(
-                event.get_integer_value_field(SCROLL_PHASE),
-                expected,
-                "{phase:?}"
-            );
-            assert_eq!(event.get_integer_value_field(MOMENTUM_PHASE), 0);
-            assert_eq!(
-                event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
-                crate::SYNTHETIC_EVENT_USER_DATA
-            );
-        }
+        assert_eq!(
+            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2),
+            -30
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA),
+            crate::SYNTHETIC_EVENT_USER_DATA
+        );
     }
 
     #[test]
@@ -308,46 +275,21 @@ mod tests {
         );
     }
 
-    /// A gesture is continuous input: its wheel ticks become points, in both
-    /// directions, while pixel distance passes through untouched.
+    /// Precise wheel ticks become points in both directions, while pixel
+    /// distance passes through untouched.
     #[test]
-    fn gesture_wheel_ticks_become_points() {
+    fn precise_wheel_ticks_become_points() {
         assert_eq!(
-            gesture_points(ScrollDelta::wheel_ticks(0.5, -0.25)),
+            precise_points(ScrollDelta::wheel_ticks(0.5, -0.25)),
             ScrollDelta::pixels(20.0, -10.0)
         );
         assert_eq!(
-            gesture_points(ScrollDelta::wheel_ticks(-0.5, 0.0)),
-            ScrollDelta::pixels(-20.0, 0.0)
+            precise_points(ScrollDelta::wheel_ticks(-0.75, 0.0)),
+            ScrollDelta::pixels(-30.0, 0.0)
         );
         assert_eq!(
-            gesture_points(ScrollDelta::pixels(3.0, -4.0)),
+            precise_points(ScrollDelta::pixels(3.0, -4.0)),
             ScrollDelta::pixels(3.0, -4.0)
-        );
-    }
-
-    /// The event a gesture frame of wheel ticks becomes: continuous, carrying
-    /// its points and its phase.
-    #[test]
-    fn gesture_frames_are_continuous_point_events() {
-        let ScrollDelta::Pixels { x, .. } = gesture_points(ScrollDelta::wheel_ticks(-0.75, 0.0))
-        else {
-            panic!("gesture distance is in points");
-        };
-        assert!((x + 30.0).abs() < f64::EPSILON, "{x}");
-        let event = continuous_scroll_event(horizontal(-30), Some(SmoothScrollPhase::Changed))
-            .expect("a scroll event");
-        assert_eq!(
-            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_IS_CONTINUOUS),
-            1
-        );
-        assert_eq!(
-            event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2),
-            -30
-        );
-        assert_eq!(
-            event.get_integer_value_field(SCROLL_PHASE),
-            scroll_phase_value(SmoothScrollPhase::Changed)
         );
     }
 
