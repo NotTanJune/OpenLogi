@@ -3,7 +3,7 @@
 //! Hook callbacks submit typed wheel impulses through [`ScrollInputHandle`]
 //! without blocking. The worker either scales and emits them directly,
 //! evaluates finite smooth motion from absolute timestamps, or, with smoothing
-//! off, wraps a diverted horizontal wheel in a phased gesture. Pixel-precise
+//! off, emits a diverted horizontal wheel as precise scroll. Pixel-precise
 //! input never enters this runtime, so native trackpad and continuous wheel
 //! streams cannot be mixed with wheel ticks.
 //!
@@ -43,11 +43,6 @@ const CRISP_STEP_DURATION: Duration = Duration::from_millis(40);
 /// Output cadence. Position is evaluated from absolute time, so delayed wakes
 /// do not slow or lengthen the animation.
 const FRAME_PERIOD: Duration = Duration::from_millis(8);
-/// Quiet time after the last phased tick that ends the gesture. A wheel has no
-/// release event, so idleness is the only end-of-gesture signal; the value sits
-/// above the gap between ratchet ticks of a continuous spin and far below the
-/// pause between separate spins.
-const PHASED_IDLE: Duration = Duration::from_millis(120);
 /// A push repeats onto a glide only while it is still at least this fast,
 /// px/s; a push after the glide has faded is ordinary scrolling again.
 const REPEAT_MIN_SPEED: f64 = 400.0;
@@ -101,9 +96,23 @@ impl WheelDelta {
         let y = self.y * factor;
         y.is_finite().then_some(Self { x: self.x, y })
     }
+}
 
+/// One distance the worker emits at once, without easing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DirectScroll {
+    /// A traditional wheel's ticks, posted as the platform's wheel event.
+    Wheel(WheelDelta),
+    /// A diverted high-resolution wheel's ticks, posted as precise scroll.
+    Precise(WheelDelta),
+}
+
+impl DirectScroll {
     fn post(self) {
-        openlogi_inject::post_scroll(self.into());
+        match self {
+            Self::Wheel(delta) => openlogi_inject::post_scroll(delta.into()),
+            Self::Precise(delta) => openlogi_inject::post_precise_scroll(delta.into()),
+        }
     }
 }
 
@@ -143,8 +152,6 @@ struct ScrollFrame {
 enum FrameKind {
     /// Smoothed wheel output.
     Eased,
-    /// A phased gesture whose phases the application must see.
-    Phased,
     /// A momentum-scrolling glide frame, emitted outside the eased output
     /// stream. Posted like any pixel frame: phaseless, since a scroll phase
     /// declares a trackpad gesture (rubber-band overscroll, and WebKit gesture
@@ -164,23 +171,19 @@ enum FrameUnit {
 }
 
 impl ScrollFrame {
-    fn new(delta: WheelDelta, phase: SmoothScrollPhase, phased: bool) -> Self {
+    fn new(delta: WheelDelta, phase: SmoothScrollPhase) -> Self {
         Self {
             delta,
             phase,
-            kind: if phased {
-                FrameKind::Phased
-            } else {
-                FrameKind::Eased
-            },
+            kind: FrameKind::Eased,
             unit: FrameUnit::Ticks,
         }
     }
 
     /// One phaseless eased step of momentum scrolling's smoothed wheel,
     /// `ticks` in wheel ticks posted as pixels at `per_tick`. Outside the
-    /// shared output stream, so a phased gesture another wheel opened never
-    /// changes its distance or stamps it with a phase.
+    /// shared output stream, so another wheel's stream never changes its
+    /// distance or stamps it with a phase.
     fn step(ticks: WheelDelta, per_tick: f64) -> Self {
         Self {
             delta: ticks.scale(per_tick),
@@ -216,10 +219,6 @@ impl ScrollFrame {
     }
 
     fn post(self) {
-        if self.kind == FrameKind::Phased {
-            openlogi_inject::post_phased_scroll(self.delta.into(), self.phase);
-            return;
-        }
         let delta = match self.unit {
             FrameUnit::Ticks => self.delta.into(),
             #[cfg(target_os = "macos")]
@@ -400,58 +399,45 @@ impl MotionUpdate {
 /// motions may overlap, but Core Graphics has no source identity with which to
 /// pair multiple synthetic gestures; all distances therefore share this single
 /// balanced lifecycle.
-///
-/// Whoever opens the stream decides whether it is a phased gesture (`phased`
-/// on the opening frame), and every frame up to its end keeps that choice, so
-/// the application never sees a gesture that changes kind half-way.
 #[derive(Default)]
 enum OutputStream {
     #[default]
     Idle,
-    Active {
-        phased: bool,
-    },
+    Active,
 }
 
 impl OutputStream {
-    fn progress(&mut self, delta: WheelDelta, phased: bool, emit: &mut impl FnMut(ScrollFrame)) {
+    fn progress(&mut self, delta: WheelDelta, emit: &mut impl FnMut(ScrollFrame)) {
         if delta.is_zero() {
             return;
         }
-        let (phase, phased) = match *self {
+        let phase = match self {
             Self::Idle => {
-                *self = Self::Active { phased };
-                (SmoothScrollPhase::Began, phased)
+                *self = Self::Active;
+                SmoothScrollPhase::Began
             }
-            Self::Active { phased } => (SmoothScrollPhase::Changed, phased),
+            Self::Active => SmoothScrollPhase::Changed,
         };
-        emit(ScrollFrame::new(delta, phase, phased));
+        emit(ScrollFrame::new(delta, phase));
     }
 
-    fn finish(&mut self, delta: WheelDelta, phased: bool, emit: &mut impl FnMut(ScrollFrame)) {
-        match *self {
+    fn finish(&mut self, delta: WheelDelta, emit: &mut impl FnMut(ScrollFrame)) {
+        match self {
             Self::Idle if !delta.is_zero() => {
-                emit(ScrollFrame::new(delta, SmoothScrollPhase::Began, phased));
-                emit(ScrollFrame::new(
-                    WheelDelta::ZERO,
-                    SmoothScrollPhase::Ended,
-                    phased,
-                ));
+                emit(ScrollFrame::new(delta, SmoothScrollPhase::Began));
+                emit(ScrollFrame::new(WheelDelta::ZERO, SmoothScrollPhase::Ended));
             }
-            Self::Active { phased } => {
-                emit(ScrollFrame::new(delta, SmoothScrollPhase::Ended, phased));
-            }
+            Self::Active => emit(ScrollFrame::new(delta, SmoothScrollPhase::Ended)),
             Self::Idle => {}
         }
         *self = Self::Idle;
     }
 
     fn cancel(&mut self, emit: &mut impl FnMut(ScrollFrame)) {
-        if let Self::Active { phased } = *self {
+        if matches!(self, Self::Active) {
             emit(ScrollFrame::new(
                 WheelDelta::ZERO,
                 SmoothScrollPhase::Cancelled,
-                phased,
             ));
         }
         *self = Self::Idle;
@@ -464,10 +450,6 @@ impl OutputStream {
 #[derive(Default)]
 struct ScrollEngine {
     active: HashMap<ScrollSource, ActiveMotion>,
-    /// Sources inside an unsmoothed phased gesture, each with the instant its
-    /// idle window closes. Disjoint from `active`: smoothing on or off decides
-    /// which map a source can enter, and a preference change cancels both.
-    phased: HashMap<ScrollSource, Instant>,
     output: OutputStream,
     /// Smoothed main wheels under momentum scrolling, each with its device's
     /// settings, its free-spin detector and, while it glides, its glide.
@@ -924,15 +906,13 @@ impl ScrollEngine {
         }
     }
 
-    /// Whether nothing on the shared output stream is moving: no phased
-    /// gesture, and no eased motion but momentum scrolling's smoothed
-    /// wheels, whose steps stay off the stream ([`ScrollFrame::step`]).
+    /// Whether nothing on the shared output stream is moving: no eased motion
+    /// but momentum scrolling's smoothed wheels, whose steps stay off the
+    /// stream ([`ScrollFrame::step`]).
     fn stream_idle(&self) -> bool {
-        self.phased.is_empty()
-            && self
-                .active
-                .keys()
-                .all(|source| self.pixels_for(source).is_some())
+        self.active
+            .keys()
+            .all(|source| self.pixels_for(source).is_some())
     }
 
     /// Emit due glide frames, end the glides that ran their course or whose
@@ -1049,22 +1029,7 @@ impl ScrollEngine {
         }
     }
 
-    /// Emit one tick immediately inside a phased gesture and push back the
-    /// idle deadline that ends it. The first tick of a gesture is `Began`.
-    fn phased_impulse(
-        &mut self,
-        source: ScrollSource,
-        impulse: WheelDelta,
-        at: Instant,
-        emit: &mut impl FnMut(ScrollFrame),
-    ) {
-        self.end_idle_phased(at, emit);
-        self.output.progress(impulse, true, emit);
-        self.phased.insert(source, at + PHASED_IDLE);
-    }
-
     fn advance_due(&mut self, at: Instant, emit: &mut impl FnMut(ScrollFrame)) {
-        self.end_idle_phased(at, emit);
         self.advance_glides(at, emit);
         self.advance_segments(at, emit);
     }
@@ -1093,19 +1058,8 @@ impl ScrollEngine {
         }
     }
 
-    /// Close the gesture once every phased source has been idle past its
-    /// deadline. Sources still inside their window keep the gesture open.
-    fn end_idle_phased(&mut self, at: Instant, emit: &mut impl FnMut(ScrollFrame)) {
-        let before = self.phased.len();
-        self.phased.retain(|_, deadline| *deadline > at);
-        if self.phased.len() != before && self.stream_idle() {
-            self.output.finish(WheelDelta::ZERO, true, emit);
-        }
-    }
-
     fn next_deadline(&self) -> Option<Instant> {
-        let frame = self
-            .active
+        self.active
             .values()
             .map(|motion| motion.next_frame)
             .chain(
@@ -1113,8 +1067,7 @@ impl ScrollEngine {
                     .values()
                     .filter_map(|state| state.glide.next_tick()),
             )
-            .min();
-        frame.into_iter().chain(self.phased.values().copied()).min()
+            .min()
     }
 
     fn cancel_source(&mut self, source: &ScrollSource, emit: &mut impl FnMut(ScrollFrame)) {
@@ -1132,10 +1085,9 @@ impl ScrollEngine {
         emit: &mut impl FnMut(ScrollFrame),
     ) {
         self.wheels.retain(|source, _| !cancelled(source));
-        let before = (self.active.len(), self.phased.len());
+        let before = self.active.len();
         self.active.retain(|source, _| !cancelled(source));
-        self.phased.retain(|source, _| !cancelled(source));
-        let removed = (self.active.len(), self.phased.len()) != before;
+        let removed = self.active.len() != before;
         if removed && self.stream_idle() {
             self.output.cancel(emit);
         }
@@ -1144,7 +1096,6 @@ impl ScrollEngine {
     fn cancel_all(&mut self, emit: &mut impl FnMut(ScrollFrame)) {
         self.wheels.clear();
         self.active.clear();
-        self.phased.clear();
         self.output.cancel(emit);
     }
 
@@ -1162,13 +1113,11 @@ impl ScrollEngine {
             return;
         }
         match update {
-            // A phased gesture still open (after a smoothing toggle) owns the
-            // stream's end, so a motion finishing under it only progresses it.
             MotionUpdate::Finished(delta) if self.stream_idle() => {
-                self.output.finish(delta, false, emit);
+                self.output.finish(delta, emit);
             }
             MotionUpdate::Active(delta) | MotionUpdate::Finished(delta) => {
-                self.output.progress(delta, false, emit);
+                self.output.progress(delta, emit);
             }
         }
     }
