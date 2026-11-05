@@ -100,6 +100,10 @@ check. Strafe's speed and hotkey settings are snapshotted around each rebuild,
 restored if an upstream migration changed them, and checked against the
 bundled helper (a renamed settings key raises a notification).
 
+Each check counts toward the daily limit whether or not it succeeds, so a failure
+waits for the next day instead of repeating on every guard trigger. An unchanged
+problem notifies once; a clean check clears it.
+
 Run it by hand with `scripts/openlogi-custom.sh check-updates`.
 
 ## Settings the guard enforces

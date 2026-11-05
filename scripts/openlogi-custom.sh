@@ -66,10 +66,18 @@ mkdir -p "$STATE" "$STOCK_DIR"
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
 die() {
   log "ERROR: $*"
+  printf '%s\n' "$*" >"$STATE/last-error"
   exit 1
 }
 notify() {
   osascript -e "display notification \"$1\" with title \"OpenLogi custom\"" >/dev/null 2>&1 || true
+}
+# Announce a problem once: the guard retries daily, and an unchanged problem
+# is not news. cmd_check_updates forgets it after a clean run.
+notify_once() {
+  [[ "$(cat "$STATE/last-notified" 2>/dev/null)" == "$1" ]] && return 0
+  printf '%s\n' "$1" >"$STATE/last-notified"
+  notify "$1"
 }
 sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 version_of() { defaults read "$1/Contents/Info.plist" CFBundleShortVersionString; }
@@ -426,7 +434,7 @@ publish_fork() {
   fi
   if [[ -z "$covered" ]]; then
     log "WARNING: GitHub's $branch of $repo has commits this Mac lacks; not overwriting"
-    notify "$(basename "$repo"): GitHub has changes this Mac lacks; push skipped"
+    notify_once "$(basename "$repo"): GitHub has changes this Mac lacks; push skipped"
     return 0
   fi
   if git -C "$repo" push --quiet "--force-with-lease=$branch:$remote" origin "$branch" >>"$LOG" 2>&1; then
@@ -444,7 +452,7 @@ sync_fork() {
   if [[ "$(git -C "$repo" rev-parse --abbrev-ref HEAD)" != "$branch" ]] ||
     [[ -n "$(git -C "$repo" status --porcelain --untracked-files=no)" ]]; then
     log "$name: not on a clean $branch; update check skipped"
-    notify "$name update check skipped: commit or switch to $branch"
+    notify_once "$name update check skipped: commit or switch to $branch"
     return 1
   fi
   if [[ -z "${OPENLOGI_CUSTOM_OFFLINE:-}" ]]; then
@@ -462,13 +470,13 @@ sync_fork() {
   if ! git -C "$repo" rebase --quiet --onto "$upstream" "$base" "$branch" >>"$LOG" 2>&1; then
     git -C "$repo" rebase --abort >/dev/null 2>&1 || true
     log "$name: rebase onto $upstream conflicted; keeping the working build"
-    notify "$name update needs a manual merge; your current build is unchanged"
+    notify_once "$name update needs a manual merge; your current build is unchanged"
     return 1
   fi
   if ! (cd "$repo" && eval "$verify") >>"$LOG" 2>&1; then
     git -C "$repo" reset --quiet --hard "$old"
     log "$name: updated code failed its build or tests; rolled back"
-    notify "$name update failed its tests; your current build is unchanged"
+    notify_once "$name update failed its tests; your current build is unchanged"
     return 1
   fi
   publish_fork "$repo" "$branch"
@@ -502,14 +510,18 @@ restore_settings() {
     want=${titles[$SNAP_SPEED]:-Instant}
     "$helper" speed 2>/dev/null | head -1 | grep -q "$want" || {
       log "WARNING: bundled Strafe does not read the stored speed ($want); its settings keys may have changed"
-      notify "Strafe settings may have changed upstream; check the Space Switching menu"
+      notify_once "Strafe settings may have changed upstream; check the Space Switching menu"
     }
   fi
 }
 
 cmd_check_updates() {
   lock
-  local rebuild="" source="" tag installed
+  # Stamped before the work: every run counts, so a failure waits for the next
+  # daily check rather than repeating on each guard trigger.
+  date +%s >"$STATE/last-update-check"
+  rm -f "$STATE/last-error"
+  local rebuild="" source="" tag installed pending=""
   snapshot_settings
   sync_fork "$STRAFE_REPO" "$STRAFE_BRANCH" upstream/main \
     'swift build --quiet -c release --product strafe && swift test --quiet' && rebuild=1
@@ -519,22 +531,26 @@ cmd_check_updates() {
   if [[ -n "$tag" && "v$installed" != "$tag" ]] &&
     [[ "$(printf '%s\n%s\n' "v$installed" "$tag" | sort -V | tail -1)" == "$tag" ]]; then
     log "OpenLogi $tag is available (installed $installed)"
-    source=$(download_release "$tag") || source=""
+    source=$(download_release "$tag") || {
+      source=""
+      pending=$tag
+    }
   fi
   if [[ -n "$source" ]]; then
-    notify "Updating OpenLogi to $tag with your custom features"
     cmd_apply "$source"
   elif [[ -n "$rebuild" ]]; then
     cmd_apply
+  elif [[ -n "$pending" ]]; then
+    log "update check: OpenLogi $pending is not installable yet; will retry"
   else
     log "update check: everything is current"
+    rm -f "$STATE/last-notified"
   fi
   restore_settings
   # Retry anything a previous run could not publish.
   publish_fork "$REPO" "$BRANCH"
   publish_fork "$STRAFE_REPO" "$STRAFE_BRANCH"
   publish_fork "$AUTORAISE_REPO" master
-  date +%s >"$STATE/last-update-check"
 }
 
 cmd_restore() {
@@ -551,7 +567,10 @@ cmd_guard() {
     local last
     last=$(cat "$STATE/last-update-check" 2>/dev/null || echo 0)
     if (($(date +%s) - last >= 86400)); then
-      (cmd_check_updates) || log "update check failed; the working build is unchanged"
+      (cmd_check_updates) || {
+        log "update check failed; the working build is unchanged"
+        notify_once "OpenLogi update failed, working build unchanged: $(cat "$STATE/last-error" 2>/dev/null)"
+      }
     fi
     exit 0
   fi
