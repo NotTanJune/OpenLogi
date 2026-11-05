@@ -102,7 +102,11 @@ bundled helper (a renamed settings key raises a notification).
 
 Each check counts toward the daily limit whether or not it succeeds, so a failure
 waits for the next day instead of repeating on every guard trigger. An unchanged
-problem notifies once; a clean check clears it.
+problem notifies once, however many problems take turns; a clean check or a
+finished apply clears them. The guard clears a lock left by a killed run, keeps
+its private script copy on the custom branch's version, and treats any failing
+command as a failure, not only an explicit one. `scripts/test-openlogi-custom.sh`
+covers all of this, and `apply` refuses to build if it fails.
 
 Run it by hand with `scripts/openlogi-custom.sh check-updates`.
 

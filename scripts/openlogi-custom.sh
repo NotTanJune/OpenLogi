@@ -63,6 +63,9 @@ GUARD_PLIST="$HOME/Library/LaunchAgents/$GUARD_LABEL.plist"
 
 mkdir -p "$STATE" "$STOCK_DIR"
 
+# This script's own path. The test suite points it at a fixture.
+SELF="$0"
+
 log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG" >&2; }
 die() {
   log "ERROR: $*"
@@ -72,22 +75,27 @@ die() {
 notify() {
   osascript -e "display notification \"$1\" with title \"OpenLogi custom\"" >/dev/null 2>&1 || true
 }
-# Announce a problem once: the guard retries daily, and an unchanged problem
-# is not news. cmd_check_updates forgets it after a clean run.
+# Announce each problem once: the guard retries daily, and an unchanged problem
+# is not news. Every problem still open is listed, so two that alternate do not
+# take turns. A clean check or a finished apply forgets them all.
 notify_once() {
-  [[ "$(cat "$STATE/last-notified" 2>/dev/null)" == "$1" ]] && return 0
-  printf '%s\n' "$1" >"$STATE/last-notified"
+  grep -Fxq -- "$1" "$STATE/last-notified" 2>/dev/null && return 0
+  printf '%s\n' "$1" >>"$STATE/last-notified"
   notify "$1"
 }
 sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 version_of() { defaults read "$1/Contents/Info.plist" CFBundleShortVersionString; }
 
+# A lock older than an hour is left over from a killed run.
+lock_is_stale() {
+  [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]]
+}
+
 lock() {
   # Reentrant: check-updates holds the lock while it calls apply.
   [[ -n "${LOCK_HELD:-}" ]] && return 0
   if ! mkdir "$LOCK" 2>/dev/null; then
-    # A lock older than an hour is left over from a killed run.
-    if [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]]; then
+    if lock_is_stale; then
       rm -rf "$LOCK" && mkdir "$LOCK"
     else
       log "another openlogi-custom run holds $LOCK; skipping"
@@ -320,6 +328,8 @@ cmd_apply() {
   log "applying custom agent to stock $version"
 
   port_to "$version"
+  # A rebase can reach this script; a build must not bring the update loop back.
+  "$REPO/scripts/test-openlogi-custom.sh" >>"$LOG" 2>&1 || die "the update guard's tests failed"
   build_agent
   build_helpers
   build_simple
@@ -364,6 +374,7 @@ EOF
   is_custom "$APP" || die "installed app does not match the staged custom build"
   log "installed custom OpenLogi $version (agent $agent_sha)"
   publish_fork "$REPO" "$BRANCH"
+  rm -f "$STATE/last-notified" "$STATE/last-error"
   notify "Custom gestures applied to OpenLogi $version"
 }
 
@@ -559,26 +570,60 @@ cmd_restore() {
   log "restored last-good custom bundle"
 }
 
+# Run a command in a child that stops at its first failing command, and leave
+# its status in STRICT_STATUS. `set -e` is off for anything run under `||` or
+# `if`, including a function and its subshells, so a failure that is not a die
+# would run on as if nothing had happened. Call this as a plain statement, never
+# as a condition.
+strict() {
+  (
+    set -e
+    "$@"
+  ) &
+  STRICT_STATUS=0
+  wait $! || STRICT_STATUS=$?
+}
+
+# Move the guard's private copy to the script committed on the custom branch, so
+# a fix reaches the guard without waiting for the next apply. Takes effect on the
+# next run; a copy that does not even parse is refused.
+refresh_guard_copy() {
+  local copy="$STATE/openlogi-custom.sh" latest="$REPO/scripts/openlogi-custom.sh"
+  [[ "$SELF" -ef "$copy" && -f "$latest" ]] || return 0
+  [[ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)" == "$BRANCH" ]] || return 0
+  cmp -s "$latest" "$copy" && return 0
+  bash -n "$latest" 2>/dev/null || return 0
+  install -m 0755 "$latest" "$copy"
+  log "guard: updated its script copy"
+}
+
 cmd_guard() {
   ensure_settings
   [[ -d "$APP" ]] || exit 0
-  [[ -d "$LOCK" ]] && exit 0
+  if [[ -d "$LOCK" ]]; then
+    lock_is_stale || exit 0
+    log "guard: clearing a lock left by a killed run"
+    rm -rf "$LOCK"
+  fi
+  refresh_guard_copy
   if is_custom "$APP"; then
     local last
     last=$(cat "$STATE/last-update-check" 2>/dev/null || echo 0)
     if (($(date +%s) - last >= 86400)); then
-      (cmd_check_updates) || {
+      strict cmd_check_updates
+      if ((STRICT_STATUS != 0)); then
         log "update check failed; the working build is unchanged"
-        notify_once "OpenLogi update failed, working build unchanged: $(cat "$STATE/last-error" 2>/dev/null)"
-      }
+        notify_once "OpenLogi update failed, working build unchanged: $(cat "$STATE/last-error" 2>/dev/null || echo "see $LOG")"
+      fi
     fi
     exit 0
   fi
   if is_stock "$APP"; then
     log "guard: stock OpenLogi $(version_of "$APP") replaced the custom build; re-applying"
-    notify "OpenLogi was updated; re-applying custom gestures"
-    if (cmd_apply "$APP"); then exit 0; fi
-    notify "Re-applying custom gestures failed; restored the last custom build. See $LOG"
+    notify_once "OpenLogi was updated; re-applying custom gestures"
+    strict cmd_apply "$APP"
+    ((STRICT_STATUS != 0)) || exit 0
+    notify_once "Re-applying custom gestures failed; restored the last custom build. See $LOG"
     cmd_restore
     exit 1
   fi
